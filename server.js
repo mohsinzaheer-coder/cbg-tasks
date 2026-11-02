@@ -5,7 +5,8 @@
  *
  * Roles
  *   owner   — sees and manages everyone, every client and every task
- *   manager — sees himself, his own staff, and the clients assigned to him or his staff
+ *   partner — sees business tasks of his own staff, tasks he assigned or is listed on, and all clients;
+ *             staff report to a partner (version 2.4 merged the former manager role into partner)
  *   staff   — sees only his own tasks and the clients assigned to him
  * Every rule below is enforced here on the server, never only in the browser.
  *
@@ -166,6 +167,11 @@ CREATE TABLE IF NOT EXISTS recurring (
     console.log('Database upgraded: partner role added.');
   }
 }
+// Version 2.4: the manager role is retired; every manager becomes a partner and keeps their staff and clients.
+{
+  const r = db.prepare("UPDATE users SET role = 'partner' WHERE role = 'manager'").run();
+  if (r.changes) console.log(`Database upgraded: ${r.changes} manager(s) are now partners.`);
+}
 db.exec(`CREATE TABLE IF NOT EXISTS task_partners (
   task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
   user_id INTEGER NOT NULL REFERENCES users(id),
@@ -285,13 +291,13 @@ function fail(key) { const a = attempts.get(key); if (!a || a.until < Date.now()
 const publicUser = u => u && ({ id: u.id, username: u.username, name: u.name, title: u.title, role: u.role, managerId: u.manager_id, active: !!u.active, mustChange: !!u.must_change });
 function teamIds(me) {
   if (me.role === 'owner') return null;
-  if (me.role === 'manager') return [me.id, ...db.prepare("SELECT id FROM users WHERE manager_id = ? AND role = 'staff'").all(me.id).map(r => r.id)];
+  if (me.role === 'partner' || me.role === 'manager') return [me.id, ...db.prepare("SELECT id FROM users WHERE manager_id = ? AND role = 'staff'").all(me.id).map(r => r.id)];
   return [me.id];
 }
 function canManageUser(me, target) {
   if (!target || target.deleted) return false;
   if (me.role === 'owner') return true;
-  if (me.role === 'manager') return target.role === 'staff' && target.manager_id === me.id;
+  if (me.role === 'partner') return target.role === 'staff' && target.manager_id === me.id;
   return false;
 }
 // Clients this person may see: owner and partners all (partners read-only); manager — his clients or clients of his staff; staff — clients assigned to him
@@ -305,7 +311,7 @@ function visibleClientIds(me) {
   return db.prepare('SELECT client_id id FROM client_staff WHERE user_id = ?').all(me.id).map(r => r.id);
 }
 function canSeeClient(me, c) { if (!c) return false; const ids = visibleClientIds(me); return ids === null || ids.includes(c.id); }
-function canEditClient(me, c) { return me.role === 'owner' || (me.role === 'manager' && c.manager_id === me.id); }
+function canEditClient(me, c) { return me.role === 'owner' || (me.role === 'partner' && c.manager_id === me.id); }
 
 /* Task visibility
  *   personal — only the person who created it, nobody else (the owner included)
@@ -325,14 +331,13 @@ function visibleTask(me, t, partners) {
   if (!t) return false;
   if (t.visibility === 'personal') return t.created_by === me.id;
   if (me.role === 'owner' || t.assignee_id === me.id || t.created_by === me.id) return true;
-  if (me.role === 'partner') return (partners ?? taskPartners(t.id)).some(p => p.id === me.id);
-  if (me.role === 'manager') return teamIds(me).includes(t.assignee_id);
+  if (me.role === 'partner') return teamIds(me).includes(t.assignee_id) || (partners ?? taskPartners(t.id)).some(p => p.id === me.id);
   return false;
 }
 function canEditTask(me, t) {
   if (t.visibility === 'personal') return t.created_by === me.id;
   if (me.role === 'owner' || t.created_by === me.id) return true;
-  if (me.role === 'manager') return t.assignee_id !== me.id && teamIds(me).includes(t.assignee_id);
+  if (me.role === 'partner') return t.assignee_id !== me.id && teamIds(me).includes(t.assignee_id);
   return false;
 }
 function taskOut(t, me, partners) {
@@ -435,17 +440,17 @@ route('GET', '/api/users', true, async (req, res, body, me) => {
   send(res, 200, { users: rows.map(publicUser) });
 });
 route('POST', '/api/users', true, async (req, res, body, me) => {
-  if (me.role !== 'owner' && me.role !== 'manager') throw new HttpError(403, 'Only the owner and managers can add people.');
+  if (me.role !== 'owner' && me.role !== 'partner') throw new HttpError(403, 'Only the owner and partners can add people.');
   const name = str(body.name, 80, 'Name'); const username = str(body.username, 40, 'Login ID'); const title = str(body.title, 60, 'Job title');
   const role = me.role === 'owner' ? body.role : 'staff';
   if (!name) throw bad('Enter a name.');
   if (!/^[A-Za-z0-9._-]{3,40}$/.test(username)) throw bad('Login ID must be 3–40 letters, numbers, dots, dashes or underscores.');
-  if (!['partner', 'manager', 'staff'].includes(role)) throw bad('Role must be partner, manager or staff.');
+  if (!['partner', 'staff'].includes(role)) throw bad('Role must be partner or staff.');
   const p = passwordProblem(body.password); if (p) throw bad(p);
   let managerId = null;
   if (role === 'staff') {
-    managerId = me.role === 'manager' ? me.id : Number(body.managerId);
-    if (!db.prepare("SELECT 1 FROM users WHERE id = ? AND role = 'manager' AND active = 1").get(managerId)) throw bad('Choose the manager this staff member reports to.');
+    managerId = me.role === 'partner' ? me.id : Number(body.managerId);
+    if (!db.prepare("SELECT 1 FROM users WHERE id = ? AND role = 'partner' AND active = 1 AND deleted = 0").get(managerId)) throw bad('Choose the partner this staff member reports to.');
   }
   if (db.prepare('SELECT 1 FROM users WHERE username = ?').get(username)) throw bad('That login ID is already taken.');
   const r = db.prepare('INSERT INTO users (username,password_hash,name,title,role,manager_id,must_change,created_at) VALUES (?,?,?,?,?,?,1,?)')
@@ -468,13 +473,13 @@ route('PATCH', '/api/users/:id', true, async (req, res, body, me, params) => {
   if ('password' in body) { const p = passwordProblem(body.password); if (p) throw bad(p); sets.password_hash = hashPassword(body.password); sets.must_change = 1; }
   if ('active' in body) {
     if (target.id === me.id) throw bad('You cannot deactivate your own account.');
-    if (target.role === 'manager' && !body.active && db.prepare('SELECT 1 FROM users WHERE manager_id = ? AND active = 1').get(target.id)) throw bad('Move this manager\'s staff to another manager first.');
+    if (target.role === 'partner' && !body.active && db.prepare('SELECT 1 FROM users WHERE manager_id = ? AND active = 1 AND deleted = 0').get(target.id)) throw bad('Move this partner\'s staff to another partner first.');
     sets.active = body.active ? 1 : 0;
   }
   if ('managerId' in body) {
-    if (me.role !== 'owner' || target.role !== 'staff') throw new HttpError(403, 'Only the owner can move staff between managers.');
-    const m = db.prepare("SELECT * FROM users WHERE id = ? AND role = 'manager' AND active = 1").get(Number(body.managerId));
-    if (!m) throw bad('Choose an active manager.');
+    if (me.role !== 'owner' || target.role !== 'staff') throw new HttpError(403, 'Only the owner can move staff between partners.');
+    const m = db.prepare("SELECT * FROM users WHERE id = ? AND role = 'partner' AND active = 1 AND deleted = 0").get(Number(body.managerId));
+    if (!m) throw bad('Choose an active partner.');
     sets.manager_id = m.id;
   }
   const keys = Object.keys(sets);
@@ -489,8 +494,8 @@ route('DELETE', '/api/users/:id', true, async (req, res, body, me, params) => {
   const target = db.prepare('SELECT * FROM users WHERE id = ?').get(Number(params.id));
   if (!canManageUser(me, target) || target.id === me.id) throw new HttpError(404, 'Person not found.');
   if (target.role === 'owner') throw bad('The owner account cannot be deleted.');
-  if (target.role === 'manager' && db.prepare('SELECT 1 FROM users WHERE manager_id = ? AND deleted = 0').get(target.id))
-    throw bad('Move this manager\'s staff to another manager first.');
+  if (target.role === 'partner' && db.prepare('SELECT 1 FROM users WHERE manager_id = ? AND deleted = 0').get(target.id))
+    throw bad('Move this partner\'s staff to another partner first.');
   const n = sql => db.prepare(sql).get(target.id).n;
   // Personal tasks are never handed over; they stay private and hidden.
   const openTasks = n("SELECT COUNT(*) n FROM tasks WHERE assignee_id = ? AND status <> 'done' AND visibility = 'business'");
@@ -503,7 +508,6 @@ route('DELETE', '/api/users/:id', true, async (req, res, body, me, params) => {
     if (!to || to.id === target.id || to.role === 'owner') throw bad('Choose who takes over their open work and clients.');
     const team = teamIds(me);
     if (team && !team.includes(to.id)) throw bad('Choose someone in your own team.');
-    if (target.role === 'manager' && to.role !== 'manager') throw bad('Choose another manager to take over.');
     if (target.role === 'partner' && to.role !== 'partner') throw bad('Choose another partner to take over.');
   }
   tx(() => {
@@ -574,9 +578,9 @@ function clientFields(body, me, existing) {
   if ('name' in f && !f.name) throw bad('Enter the client name.');
   if ('entityType' in body) { if (!ENTITY_TYPES.includes(body.entityType)) throw bad('Choose a client type.'); f.entity_type = body.entityType; }
   if ('managerId' in body) {
-    if (me.role !== 'owner') { if (Number(body.managerId) !== me.id) throw new HttpError(403, 'Only the owner can assign clients to other managers.'); }
+    if (me.role !== 'owner') { if (Number(body.managerId) !== me.id) throw new HttpError(403, 'Only the owner can put another partner in charge of a client.'); }
     const mid = intOrNull(body.managerId);
-    if (mid !== null && !db.prepare("SELECT 1 FROM users WHERE id = ? AND role = 'manager' AND active = 1").get(mid)) throw bad('Choose an active manager.');
+    if (mid !== null && !db.prepare("SELECT 1 FROM users WHERE id = ? AND role = 'partner' AND active = 1 AND deleted = 0").get(mid)) throw bad('Choose an active partner.');
     f.manager_id = mid;
   }
   if ('active' in body) { if (me.role !== 'owner') throw new HttpError(403, 'Only the owner can archive clients.'); f.active = body.active ? 1 : 0; }
@@ -588,14 +592,14 @@ function setClientStaff(me, clientId, managerId, staffIds) {
   for (const id of ids) {
     const u = db.prepare("SELECT * FROM users WHERE id = ? AND role = 'staff' AND active = 1").get(id);
     if (!u) throw bad('One of the chosen staff members is not active.');
-    if (me.role === 'manager' && u.manager_id !== me.id) throw bad('You can only assign your own staff.');
+    if (me.role === 'partner' && u.manager_id !== me.id) throw bad('You can only assign your own staff.');
   }
   db.prepare('DELETE FROM client_staff WHERE client_id = ?').run(clientId);
   const ins = db.prepare('INSERT INTO client_staff VALUES (?,?)'); for (const id of ids) ins.run(clientId, id);
 }
 route('POST', '/api/clients', true, async (req, res, body, me) => {
-  if (me.role !== 'owner' && me.role !== 'manager') throw new HttpError(403, 'Only the owner and managers can add clients.');
-  if (me.role === 'manager') body.managerId = me.id;
+  if (me.role !== 'owner' && me.role !== 'partner') throw new HttpError(403, 'Only the owner and partners can add clients.');
+  if (me.role === 'partner') body.managerId = me.id;
   if (!('name' in body)) throw bad('Enter the client name.');
   const f = clientFields(body, me, null);
   const id = tx(() => {
@@ -616,9 +620,9 @@ route('PATCH', '/api/clients/:id', true, async (req, res, body, me, params) => {
     const cols = Object.keys(f);
     if (cols.length) db.prepare(`UPDATE clients SET ${cols.map(k => k + ' = ?').join(', ')}, updated_at = ? WHERE id = ?`).run(...cols.map(k => f[k]), Date.now(), c.id);
     if ('staffIds' in body) {
-      // a manager editing keeps staff from other teams that the owner assigned
+      // a partner editing keeps staff from other teams that the owner assigned
       let keep = [];
-      if (me.role === 'manager') keep = db.prepare('SELECT cs.user_id FROM client_staff cs JOIN users u ON u.id = cs.user_id WHERE cs.client_id = ? AND u.manager_id <> ?').all(c.id, me.id).map(r => r.user_id);
+      if (me.role === 'partner') keep = db.prepare('SELECT cs.user_id FROM client_staff cs JOIN users u ON u.id = cs.user_id WHERE cs.client_id = ? AND u.manager_id <> ?').all(c.id, me.id).map(r => r.user_id);
       setClientStaff(me, c.id, f.manager_id ?? c.manager_id, body.staffIds);
       const ins = db.prepare('INSERT OR IGNORE INTO client_staff VALUES (?,?)'); for (const k of keep) ins.run(c.id, k);
     }
@@ -670,12 +674,12 @@ route('GET', '/api/tasks', true, async (req, res, body, me) => {
   const rows = db.prepare(TASK_SELECT + ' ORDER BY t.created_at DESC').all().filter(t => visibleTask(me, t, pm.get(t.id) || []));
   send(res, 200, { tasks: rows.map(t => taskOut(t, me, pm.get(t.id) || [])) });
 });
-// Owner: anyone. Partner: any partner, manager or staff. Manager: himself and his own staff.
+// Owner: anyone. Partner: any partner or staff member.
 function checkAssignee(me, id) {
   const a = db.prepare('SELECT * FROM users WHERE id = ? AND active = 1 AND deleted = 0').get(Number(id));
   if (!a) throw bad('Choose who this task is for.');
   if (me.role === 'owner') return a;
-  if (me.role === 'partner') { if (a.role === 'owner') throw bad('Partners can assign to partners, managers and staff.'); return a; }
+  if (me.role === 'partner') { if (a.role === 'owner') throw bad('Partners can assign to partners and staff.'); return a; }
   if (me.role === 'manager' && teamIds(me).includes(a.id)) return a;
   throw bad('You can only assign tasks to your own team.');
 }
@@ -835,13 +839,12 @@ const RULE_SELECT = `SELECT r.*, k.name category_name, c.name client_name, a.nam
 function canSeeRule(me, r) {
   if (me.role === 'owner') return true;
   if (r.created_by === me.id || r.assignee_id === me.id) return true;
-  if (me.role === 'partner') return (r.partner_ids || '').split(',').map(Number).includes(me.id);
-  if (me.role === 'manager') return teamIds(me).includes(r.assignee_id);
+  if (me.role === 'partner') return teamIds(me).includes(r.assignee_id) || (r.partner_ids || '').split(',').map(Number).includes(me.id);
   return false;
 }
 function canEditRule(me, r) {
   if (me.role === 'owner' || (me.role !== 'staff' && r.created_by === me.id)) return true;
-  return me.role === 'manager' && r.assignee_id !== me.id && teamIds(me).includes(r.assignee_id);
+  return me.role === 'partner' && r.assignee_id !== me.id && teamIds(me).includes(r.assignee_id);
 }
 function ruleFields(body, me, cur) {
   const f = {};

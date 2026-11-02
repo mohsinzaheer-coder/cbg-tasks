@@ -3,7 +3,7 @@
   const $ = s => document.querySelector(s);
   const STATUS = [['todo', 'To do'], ['doing', 'In progress'], ['done', 'Done']];
   const PRI = { high: 0, medium: 1, low: 2 };
-  const ROLE = { owner: 'Owner', partner: 'Partner', manager: 'Manager', staff: 'Staff' };
+  const ROLE = { owner: 'Owner', partner: 'Partner', manager: 'Partner', staff: 'Staff' };
   const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
   const state = { me: null, config: {}, users: [], tasks: [], clients: [], categories: [], rules: [], tab: 'tasks', confirm: null, editing: null, clientId: null };
 
@@ -79,7 +79,7 @@
   });
   $('#logout').onclick = async () => { try { await api('POST', '/api/logout'); } catch { } state.me = null; show('login'); $('#lUser').focus(); };
 
-  const mgmt = () => state.me && (state.me.role === 'owner' || state.me.role === 'manager');
+  const mgmt = () => state.me && (state.me.role === 'owner' || state.me.role === 'partner');
   const seesAll = () => state.me && (state.me.role === 'owner' || state.me.role === 'partner');
   async function enterApp() {
     show('app'); const me = state.me;
@@ -93,12 +93,12 @@
     $('#tasksSub').textContent = {
       staff: 'Tasks assigned to you. Update the status as you go.',
       manager: 'Tasks for you and the staff who report to you.',
-      partner: 'Business tasks you assigned, that are assigned to you, or that you are involved in as a partner.',
+      partner: 'Business tasks for you and your staff, tasks you assigned, and tasks you are involved in as a partner.',
       owner: 'Every business task across the firm. Personal tasks stay private to the person who added them.',
     }[me.role];
-    $('#feedSubBiz').textContent = me.role === 'manager' ? 'Business tasks you add here must name at least one partner, who can then follow them.' : 'Business tasks you add here can be shared with partners.';
-    $('#clientsSub').textContent = { owner: 'All clients, their registrations and portal logins.', partner: 'All clients and their portal logins (view only).', manager: 'Clients assigned to you and your staff.', staff: 'Clients you work on.' }[me.role];
-    $('#peopleSub').textContent = me.role === 'owner' ? 'Partners, managers, and the staff who report to each manager.' : 'The staff who report to you.';
+    $('#feedSubBiz').textContent = 'Business tasks you add here can be shared with partners.';
+    $('#clientsSub').textContent = { owner: 'All clients, their registrations and portal logins.', partner: 'All clients and their portal logins. You can edit the clients you are in charge of.', manager: 'Clients assigned to you and your staff.', staff: 'Clients you work on.' }[me.role];
+    $('#peopleSub').textContent = me.role === 'owner' ? 'Partners and the staff who report to each of them.' : 'The staff who report to you.';
     $('#newPersonBtn').textContent = me.role === 'owner' ? '+ Add person' : '+ Add staff member';
     $('#catPanel').hidden = me.role !== 'owner';
     if ((!lead() && ['recurring', 'feed'].includes(state.tab)) || (!mgmt() && state.tab === 'people')) state.tab = 'tasks';
@@ -141,20 +141,21 @@
     const me = state.me; const active = state.users.filter(u => u.active);
     const label = u => u.name + (u.title ? ' · ' + u.title : '');
     if (me.role === 'staff') return;
-    if (me.role === 'manager') {
-      for (const u of active.filter(u => u.id === me.id || (u.role === 'staff' && u.managerId === me.id))) opt(sel, u.id, u.id === me.id ? u.name + ' (me)' : label(u));
-      return;
-    }
     opt(sel, me.id, forFilter ? 'My own tasks' : me.name + ' (me)');
-    const partners = active.filter(u => u.role === 'partner' && u.id !== me.id);
-    if (partners.length) { const g = el('optgroup'); g.label = 'Partners'; for (const p of partners) { const o = el('option', null, label(p)); o.value = p.id; g.append(o); } sel.append(g); }
-    for (const m of active.filter(u => u.role === 'manager')) {
-      const g = el('optgroup'); g.label = m.name + '’s team';
-      if (forFilter) { const o1 = el('option', null, 'Whole team of ' + m.name); o1.value = 'team:' + m.id; g.append(o1); }
-      const om = el('option', null, m.name + ' (manager)'); om.value = m.id; g.append(om);
-      for (const s of active.filter(u => u.role === 'staff' && u.managerId === m.id)) { const o = el('option', null, label(s)); o.value = s.id; g.append(o); }
+    // One group per partner with the staff who report to them; my own team first
+    const partners = active.filter(u => u.role === 'partner').sort((x, y) => (y.id === me.id) - (x.id === me.id) || x.name.localeCompare(y.name));
+    for (const p of partners) {
+      const isMe = p.id === me.id;
+      const staff = active.filter(u => u.role === 'staff' && u.managerId === p.id);
+      if (isMe && !staff.length) continue;
+      const g = el('optgroup'); g.label = isMe ? 'My team' : p.name + '’s team';
+      if (forFilter && staff.length) { const o1 = el('option', null, isMe ? 'My whole team' : 'Whole team of ' + p.name); o1.value = 'team:' + p.id; g.append(o1); }
+      if (!isMe) { const op = el('option', null, p.name + ' (partner)'); op.value = p.id; g.append(op); }
+      for (const s of staff) { const o = el('option', null, label(s)); o.value = s.id; g.append(o); }
       sel.append(g);
     }
+    const others = active.filter(u => u.role === 'staff' && !partners.some(p => p.id === u.managerId));
+    if (others.length) { const g = el('optgroup'); g.label = 'Other staff'; for (const s of others) { const o = el('option', null, label(s)); o.value = s.id; g.append(o); } sel.append(g); }
   }
   function renderFilters() {
     const sel = $('#fPerson'); const keep = sel.value;
@@ -163,7 +164,7 @@
     fillSelect($('#fPartner'), 'Any partner', state.users.filter(u => u.role === 'partner').map(u => [u.id, u.name]));
     fillSelect($('#fClient'), 'All clients', state.clients.filter(c => c.active).map(c => [c.id, c.name]));
     fillSelect($('#fCat'), 'All categories', state.categories.map(c => [c.id, c.name]));
-    if (seesAll()) fillSelect($('#cMgr'), 'All managers', state.users.filter(u => u.role === 'manager').map(u => [u.id, u.name]));
+    if (seesAll()) fillSelect($('#cMgr'), 'All partners', state.users.filter(u => u.role === 'partner').map(u => [u.id, u.name]));
   }
 
   /* ---------- tasks ---------- */
@@ -384,7 +385,7 @@
 
     const dl = el('dl', 'facts');
     const staffNames = c.staffIds.map(id => userById(id)?.name).filter(Boolean);
-    for (const [k, v] of [['NTN', c.ntn], ['STRN', c.strn], ['CNIC', c.cnic], ['Contact person', c.contactPerson], ['Phone', c.phone], ['Email', c.email], ['Manager', c.managerName], ['Staff', staffNames.join(', ')]]) {
+    for (const [k, v] of [['NTN', c.ntn], ['STRN', c.strn], ['CNIC', c.cnic], ['Contact person', c.contactPerson], ['Phone', c.phone], ['Email', c.email], ['Partner in charge', c.managerName], ['Staff', staffNames.join(', ')]]) {
       if (!v) continue; const d = el('div'); d.append(el('dt', null, k), el('dd', null, v)); dl.append(d);
     }
     if (dl.children.length) box.append(dl);
@@ -450,8 +451,8 @@
   let editClient = null;
   function staffChecks(managerId, selected) {
     const box = $('#kStaff'); box.replaceChildren();
-    const staff = state.users.filter(u => u.role === 'staff' && u.active && (state.me.role === 'manager' ? u.managerId === state.me.id : (!managerId || u.managerId === managerId)));
-    if (!staff.length) box.append(el('span', 'help', managerId || state.me.role === 'manager' ? 'No staff in this team yet.' : 'Choose a manager to see their staff.'));
+    const staff = state.users.filter(u => u.role === 'staff' && u.active && (state.me.role === 'partner' ? u.managerId === state.me.id : (!managerId || u.managerId === managerId)));
+    if (!staff.length) box.append(el('span', 'help', managerId || state.me.role === 'partner' ? 'No staff in this team yet.' : 'Choose a partner to see their staff.'));
     for (const s of staff) { const l = el('label'); const i = el('input'); i.type = 'checkbox'; i.value = s.id; i.checked = selected.includes(s.id); i.id = 'ks-' + s.id; l.append(i, document.createTextNode(s.name)); box.append(l); }
   }
   function openClient(c) {
@@ -459,8 +460,8 @@
     const type = $('#kType'); type.replaceChildren(); for (const t of state.config.entityTypes || []) opt(type, t, t);
     const owner = state.me.role === 'owner';
     $('#kMgrWrap').hidden = !owner; $('#kActiveWrap').hidden = !owner || !c;
-    const mgr = $('#kMgr'); mgr.replaceChildren(); opt(mgr, '', 'No manager yet');
-    for (const m of state.users.filter(u => u.role === 'manager' && (u.active || u.id === c?.managerId))) opt(mgr, m.id, m.name);
+    const mgr = $('#kMgr'); mgr.replaceChildren(); opt(mgr, '', 'No partner yet');
+    for (const m of state.users.filter(u => u.role === 'partner' && (u.active || u.id === c?.managerId))) opt(mgr, m.id, m.name);
     if (c) {
       $('#kName').value = c.name; $('#kCode').value = c.code; type.value = c.entityType; $('#kNtn').value = c.ntn; $('#kStrn').value = c.strn; $('#kCnic').value = c.cnic;
       $('#kContact').value = c.contactPerson; $('#kPhone').value = c.phone; $('#kEmail').value = c.email; $('#kNotes').value = c.notes; mgr.value = c.managerId ?? ''; $('#kActive').checked = c.active;
@@ -637,8 +638,8 @@
       li.append(mini); return li;
     }
     if (state.me.role === 'owner' && u.role === 'staff' && u.active) {
-      const mgrs = state.users.filter(x => x.role === 'manager' && x.active);
-      if (mgrs.length > 1) { const s = el('select'); s.id = 'move-' + u.id; s.setAttribute('aria-label', 'Move ' + u.name + ' to another manager'); for (const m of mgrs) opt(s, m.id, 'Reports to ' + m.name); s.value = String(u.managerId); s.onchange = () => moveStaff(u, Number(s.value)); mini.append(s); }
+      const mgrs = state.users.filter(x => x.role === 'partner' && x.active);
+      if (mgrs.length > 1) { const s = el('select'); s.id = 'move-' + u.id; s.setAttribute('aria-label', 'Move ' + u.name + ' to another partner'); for (const m of mgrs) opt(s, m.id, 'Reports to ' + m.name); s.value = String(u.managerId); s.onchange = () => moveStaff(u, Number(s.value)); mini.append(s); }
     }
     mini.append(btn('Edit', 'ghost', () => openPerson(u)), btn('Reset password', 'ghost', () => openReset(u)),
       btn(u.active ? 'Deactivate' : 'Reactivate', 'ghost', () => { state.confirm = key; renderPeople(); }),
@@ -647,29 +648,24 @@
   }
   function renderPeople() {
     const host = $('#peopleList'); host.replaceChildren();
-    if (state.me.role === 'manager') {
-      const g = el('section', 'group'); const h = el('div', 'group-h'); h.append(el('h2', null, 'My staff')); g.append(h);
-      const staff = state.users.filter(u => u.role === 'staff' && u.managerId === state.me.id);
-      if (!staff.length) g.append(el('p', 'empty-group', 'No staff yet. Use “Add staff member” to create their login.'));
-      const ul = el('ul', 'plist'); staff.forEach(s => ul.append(personRow(s))); g.append(ul); host.append(g); return;
+    const teamGroup = (head, staff, emptyText, title) => {
+      const g = el('section', 'group');
+      if (title) { const gh = el('div', 'group-h'); gh.append(el('h2', null, title)); g.append(gh); }
+      const ul = el('ul', 'plist');
+      if (head) { const h = personRow(head, 'Partner'); h.classList.add('mgr'); ul.append(h); }
+      staff.forEach(s => ul.append(personRow(s))); g.append(ul);
+      if (!staff.length) g.append(el('p', 'empty-group', emptyText));
+      host.append(g);
+    };
+    if (state.me.role === 'partner') {
+      teamGroup(null, state.users.filter(u => u.role === 'staff' && u.managerId === state.me.id), 'No staff yet. Use “Add staff member” to create their login.', 'My staff');
+      return;
     }
     const partners = state.users.filter(u => u.role === 'partner');
-    {
-      const g = el('section', 'group'); const gh = el('div', 'group-h'); gh.append(el('h2', null, 'Partners')); g.append(gh);
-      if (!partners.length) g.append(el('p', 'empty-group', 'No partners yet. Use “Add person” and choose Partner.'));
-      const ul = el('ul', 'plist'); partners.forEach(p => ul.append(personRow(p, 'Partner'))); g.append(ul); host.append(g);
-    }
-    const managers = state.users.filter(u => u.role === 'manager');
-    if (!managers.length) { const g = el('section', 'group'); g.append(el('p', 'empty-group', 'No managers yet. Start by adding a manager, then add the staff who report to them.')); host.append(g); }
-    for (const m of managers) {
-      const g = el('section', 'group'); const ul = el('ul', 'plist');
-      const head = personRow(m, 'Manager'); head.classList.add('mgr'); ul.append(head);
-      const staff = state.users.filter(u => u.managerId === m.id); staff.forEach(s => ul.append(personRow(s))); g.append(ul);
-      if (!staff.length) g.append(el('p', 'empty-group', 'No staff report to ' + m.name + ' yet.'));
-      host.append(g);
-    }
-    const orphans = state.users.filter(u => u.role === 'staff' && !managers.some(m => m.id === u.managerId));
-    if (orphans.length) { const g = el('section', 'group'); const gh = el('div', 'group-h'); gh.append(el('h2', null, 'Without a manager')); g.append(gh); const ul = el('ul', 'plist'); orphans.forEach(s => ul.append(personRow(s))); g.append(ul); host.append(g); }
+    if (!partners.length) { const g = el('section', 'group'); g.append(el('p', 'empty-group', 'No partners yet. Use “Add person” to add a partner, then add the staff who report to them.')); host.append(g); }
+    for (const p of partners) teamGroup(p, state.users.filter(u => u.role === 'staff' && u.managerId === p.id), 'No staff report to ' + p.name + ' yet.');
+    const orphans = state.users.filter(u => u.role === 'staff' && !partners.some(p => p.id === u.managerId));
+    if (orphans.length) teamGroup(null, orphans, '', 'Staff without a partner');
   }
   async function setActive(u, active) {
     state.confirm = null;
@@ -688,12 +684,12 @@
     $('#personForm').reset(); showErr('#personError');
     const owner = state.me.role === 'owner'; $('#roleRow').hidden = !owner || !!u;
     $('#uPassWrap').hidden = !!u; $('#uPass').required = !u; $('#personHelp').hidden = !!u;
-    const sel = $('#uMgr'); sel.replaceChildren(); for (const m of state.users.filter(x => x.role === 'manager' && x.active)) opt(sel, m.id, m.name);
+    const sel = $('#uMgr'); sel.replaceChildren(); for (const m of state.users.filter(x => x.role === 'partner' && x.active)) opt(sel, m.id, m.name);
     if (u) {
       $('#uName').value = u.name; $('#uTitle').value = u.title; $('#uLogin').value = u.username;
       $('#personDlgTitle').textContent = 'Edit ' + ({ owner: 'my details', partner: 'partner', manager: 'manager', staff: 'staff member' }[u.role]);
       $('#personSave').textContent = 'Save changes';
-    } else { $('#uRole').value = owner && !sel.options.length ? 'manager' : 'staff'; syncRole(); $('#uPass').value = tempPassword(); }
+    } else { $('#uRole').value = owner && !sel.options.length ? 'partner' : 'staff'; syncRole(); $('#uPass').value = tempPassword(); }
     $('#personDlg').showModal(); $('#uName').focus();
   }
   function syncRole() {
@@ -720,7 +716,7 @@
       return;
     }
     const role = state.me.role === 'owner' ? $('#uRole').value : 'staff';
-    if (role === 'staff' && state.me.role === 'owner' && !$('#uMgr').value) return showErr('#personError', 'Add a manager first, then add staff under them.');
+    if (role === 'staff' && state.me.role === 'owner' && !$('#uMgr').value) return showErr('#personError', 'Add a partner first, then add staff under them.');
     const body = { role, managerId: Number($('#uMgr').value) || undefined, name: $('#uName').value.trim(), title: $('#uTitle').value.trim(), username: $('#uLogin').value.trim(), password: $('#uPass').value };
     const b = $('#personSave'); b.disabled = true;
     try { const { user } = await api('POST', '/api/users', body); state.users.push(user); $('#personDlg').close(); render(); toast(`${user.name} added. Login ID: ${user.username}`); }
@@ -738,15 +734,15 @@
     const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
     $('#delTitle').textContent = 'Delete ' + u.name;
     delNeedsTransfer = !!(open || rules || cl);
-    const blocked = u.role === 'manager' && staffCount > 0;
-    if (blocked) $('#delInfo').textContent = `${u.name} still has ${plural(staffCount, 'staff member')}. Move them to another manager (People tab) before deleting.`;
+    const blocked = u.role === 'partner' && staffCount > 0;
+    if (blocked) $('#delInfo').textContent = `${u.name} still has ${plural(staffCount, 'staff member')}. Move them to another partner (People tab) before deleting.`;
     else if (delNeedsTransfer) $('#delInfo').textContent = `${u.name} has ${plural(open, 'open task')}, ${plural(rules, 'recurring task')} and ${plural(cl, 'client')}. Choose who takes these over.`;
     else $('#delInfo').textContent = `${u.name} has no open tasks or clients.`;
     const sel = $('#delTo'); sel.replaceChildren(); opt(sel, '', 'Choose a person');
-    const need = u.role === 'manager' || u.role === 'partner' ? u.role : null;
+    const need = u.role === 'partner' ? 'partner' : null;
     const cands = state.users.filter(x => x.active && x.id !== u.id && x.role !== 'owner' && (!need || x.role === need) &&
-      (state.me.role !== 'manager' || x.id === state.me.id || x.managerId === state.me.id));
-    for (const x of cands) opt(sel, x.id, x.name + (x.role === 'manager' ? ' (manager)' : x.title ? ' · ' + x.title : ''));
+      (state.me.role !== 'partner' || x.id === state.me.id || x.managerId === state.me.id));
+    for (const x of cands) opt(sel, x.id, x.name + (x.role === 'partner' ? ' (partner)' : x.title ? ' · ' + x.title : ''));
     if (u.role === 'staff' && cands.some(x => x.id === u.managerId)) sel.value = String(u.managerId);
     $('#delToWrap').hidden = blocked || !delNeedsTransfer;
     $('#delSave').disabled = blocked;

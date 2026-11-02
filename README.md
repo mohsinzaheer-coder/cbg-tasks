@@ -4,9 +4,8 @@ A web portal where every employee signs in with their own **Login ID and passwor
 
 | Role | Sees | Can do |
 |---|---|---|
-| **Owner** | Every manager, every staff member, every task | Add managers and staff, move staff between managers, assign tasks to anyone, reset passwords, deactivate accounts |
-| **Partner** | Business tasks they assigned, are assigned, or are listed on as a partner; all clients (view only) | Assign tasks to other partners, managers and staff; follow tasks they are involved in; keep a private feed |
-| **Manager** | Himself, the staff who report to him, and the clients assigned to him or his staff | Add staff to his own team, assign tasks to them, edit or delete those tasks, reset their passwords |
+| **Owner** | Every partner, every staff member, every business task | Add partners and staff, move staff between partners, assign tasks to anyone, reset passwords, deactivate accounts |
+| **Partner** | Their own staff's business tasks, tasks they assigned or are listed on as a partner; all clients (edit the ones they are in charge of) | Add and manage their own staff, assign tasks to partners and staff, follow tasks they are involved in, keep a private feed |
 | **Staff** | Only tasks assigned to him, and the clients assigned to him | Mark tasks Started or Done, add a progress note, view the portal logins of his clients. Cannot create, edit, reassign or delete tasks or clients |
 
 Every rule is checked on the server, so a staff member cannot see another person's tasks even by tampering with the browser.
@@ -69,9 +68,8 @@ Run it as a service (systemd or pm2) and put Nginx or Caddy in front for HTTPS. 
 
 ## My feed and personal tasks
 
-Owner, partners and managers have a **My feed** tab for their own to-dos. Each one is **Business** or **Personal**.
+The owner and partners have a **My feed** tab for their own to-dos. Each one is **Business** or **Personal**.
 Personal tasks are seen only by the person who added them, not by the owner or anyone else.
-Business tasks a manager adds for himself must name at least one partner, who can then follow them.
 
 ## Client portal passwords (CRED_KEY)
 
@@ -80,7 +78,7 @@ Client logins for FBR, PRA, SRB, KPRA, BRA and SECP are stored **encrypted**. Th
 - Set `CRED_KEY` to a long random phrase (at least 30 characters), for example four or five unrelated words plus numbers.
 - **Write it down and keep it somewhere safe outside the app.** If it is lost or changed, saved portal passwords can't be opened again; they would have to be re-entered.
 - Without `CRED_KEY`, the app works normally but won't save portal passwords (login IDs still save).
-- Each time someone shows a password, the app records who and when. Owners and the client's manager can see this under **Password access log**.
+- Each time someone shows a password, the app records who and when. The owner and the partner in charge of the client can see this under **Password access log**.
 
 ## Recurring tasks
 
@@ -104,8 +102,8 @@ Everything is in the database file (`DB_PATH`). Copy that file, together with th
 The CBG logo is in `logo-mark.png` (round mark) and `logo-full.png` (sign-in page). Colours are at the top of `public/styles.css`.
 
 ## Using it day to day
-1. **Owner:** go to **People → Add person** and add each manager first, then add staff and choose who they report to. Each person gets a login ID and a temporary password. Share these privately.
-2. **Managers** can add their own staff the same way.
+1. **Owner:** go to **People → Add person** and add each partner first, then add staff and choose which partner they report to. Each person gets a login ID and a temporary password. Share these privately.
+2. **Partners** can add their own staff the same way.
 3. Assign work with **+ Assign task**: title, person, priority, due date and instructions.
 4. **Staff** sign in, see only their tasks, press **Start** or **Mark done**, and add a progress note.
-5. If someone forgets their password, their manager or the owner uses **Reset password**.
+5. If someone forgets their password, their partner or the owner uses **Reset password**.

@@ -21,7 +21,7 @@
       <label for="lPass">Password<input id="lPass" name="password" type="password" autocomplete="current-password" required></label>
       <p class="form-error" id="loginError" role="alert" hidden></p>
       <button class="primary wide" type="submit">Sign in</button>
-      <p class="help">Forgot your password? Ask your manager to reset it.</p>
+      <p class="help">Forgot your password? Ask your partner or the owner to reset it.</p>
     </form>
   </div>
 </main>
@@ -110,7 +110,7 @@
       <div class="note warn" id="credsOff" hidden>Saving portal passwords is switched off. Ask the administrator to add a <b>CRED_KEY</b> setting on the server (see the guide).</div>
       <div class="toolbar">
         <label for="cSearch">Search<input id="cSearch" type="search" placeholder="Name, code, NTN or STRN"></label>
-        <label for="cMgr" id="cMgrWrap">Manager<select id="cMgr"><option value="">All managers</option></select></label>
+        <label for="cMgr" id="cMgrWrap">Partner in charge<select id="cMgr"><option value="">All partners</option></select></label>
         <label for="cShow">Show<select id="cShow"><option value="active">Active clients</option><option value="all">Including archived</option></select></label>
       </div>
       <div class="client-layout">
@@ -203,7 +203,7 @@
     </div>
     <label for="kEmail">Email<input id="kEmail" type="email" maxlength="120"></label>
     <div class="row2">
-      <label for="kMgr" id="kMgrWrap">Manager<select id="kMgr"></select></label>
+      <label for="kMgr" id="kMgrWrap">Partner in charge<select id="kMgr"></select></label>
       <div class="field"><span class="flabel">Staff working on this client</span><div class="checks" id="kStaff"></div></div>
     </div>
     <label for="kNotes">Notes<textarea id="kNotes" maxlength="2000" rows="2"></textarea></label>
@@ -262,7 +262,7 @@
   <form id="personForm" class="stack" method="dialog" autocomplete="off">
     <h2 id="personDlgTitle">Add person</h2>
     <div class="row2" id="roleRow">
-      <label for="uRole">Role<select id="uRole"><option value="staff">Staff</option><option value="manager">Manager</option><option value="partner">Partner</option></select></label>
+      <label for="uRole">Role<select id="uRole"><option value="staff">Staff</option><option value="partner">Partner</option></select></label>
       <label for="uMgr" id="uMgrWrap">Reports to<select id="uMgr"></select></label>
     </div>
     <label for="uName">Full name<input id="uName" required maxlength="80"></label>
