@@ -130,6 +130,7 @@
     sel.replaceChildren(); opt(sel, '', 'Everyone I can see');
     const active = state.users.filter(u => u.active);
     if (state.me.role === 'owner') {
+      opt(sel, state.me.id, 'My own tasks');
       for (const m of active.filter(u => u.role === 'manager')) {
         const g = el('optgroup'); g.label = m.name + '’s team';
         const o1 = el('option', null, 'Whole team of ' + m.name); o1.value = 'team:' + m.id; g.append(o1);
@@ -226,6 +227,7 @@
     sel.replaceChildren(); opt(sel, '', 'Choose a person');
     const active = state.users.filter(u => u.active);
     if (state.me.role === 'owner') {
+      opt(sel, state.me.id, state.me.name + ' (me)');
       for (const m of active.filter(u => u.role === 'manager')) {
         const g = el('optgroup'); g.label = m.name + '’s team';
         const om = el('option', null, m.name + ' (manager)'); om.value = m.id; g.append(om);
