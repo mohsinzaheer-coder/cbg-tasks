@@ -39,11 +39,12 @@ CREATE TABLE IF NOT EXISTS users (
   password_hash TEXT NOT NULL,
   name          TEXT NOT NULL,
   title         TEXT NOT NULL DEFAULT '',
-  role          TEXT NOT NULL CHECK (role IN ('owner','manager','staff')),
+  role          TEXT NOT NULL CHECK (role IN ('owner','partner','manager','staff')),
   manager_id    INTEGER REFERENCES users(id),
   active        INTEGER NOT NULL DEFAULT 1,
   must_change   INTEGER NOT NULL DEFAULT 1,
-  created_at    INTEGER NOT NULL
+  created_at    INTEGER NOT NULL,
+  deleted       INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS tasks (
   id           INTEGER PRIMARY KEY,
@@ -137,12 +138,39 @@ CREATE TABLE IF NOT EXISTS recurring (
   add('client_id', 'INTEGER REFERENCES clients(id) ON DELETE SET NULL');
   add('recurring_id', 'INTEGER REFERENCES recurring(id) ON DELETE SET NULL');
   add('period', "TEXT NOT NULL DEFAULT ''");
+  add('visibility', "TEXT NOT NULL DEFAULT 'business'");
   db.exec('CREATE INDEX IF NOT EXISTS tasks_client ON tasks(client_id)');
+  const rcols = db.prepare('PRAGMA table_info(recurring)').all().map(c => c.name);
+  if (!rcols.includes('partner_ids')) db.exec("ALTER TABLE recurring ADD COLUMN partner_ids TEXT NOT NULL DEFAULT ''");
 }
+// Version 2.3: allow the 'partner' role. SQLite can't change a CHECK rule in place, so rebuild users keeping every row and id.
 {
-  const cols = db.prepare('PRAGMA table_info(users)').all().map(c => c.name);
-  if (!cols.includes('deleted')) db.exec('ALTER TABLE users ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0');
+  const sql = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'users'").get().sql;
+  if (!sql.includes("'partner'")) {
+    const hasDeleted = db.prepare('PRAGMA table_info(users)').all().some(c => c.name === 'deleted');
+    db.exec('PRAGMA foreign_keys = OFF');
+    db.exec('BEGIN');
+    try {
+      db.exec(`CREATE TABLE users_new (
+        id INTEGER PRIMARY KEY, username TEXT NOT NULL UNIQUE COLLATE NOCASE, password_hash TEXT NOT NULL, name TEXT NOT NULL,
+        title TEXT NOT NULL DEFAULT '', role TEXT NOT NULL CHECK (role IN ('owner','partner','manager','staff')),
+        manager_id INTEGER REFERENCES users(id), active INTEGER NOT NULL DEFAULT 1, must_change INTEGER NOT NULL DEFAULT 1,
+        created_at INTEGER NOT NULL, deleted INTEGER NOT NULL DEFAULT 0)`);
+      db.exec(`INSERT INTO users_new (id,username,password_hash,name,title,role,manager_id,active,must_change,created_at,deleted)
+               SELECT id,username,password_hash,name,title,role,manager_id,active,must_change,created_at,${hasDeleted ? 'deleted' : '0'} FROM users`);
+      db.exec('DROP TABLE users');
+      db.exec('ALTER TABLE users_new RENAME TO users');
+      db.exec('COMMIT');
+    } catch (e) { db.exec('ROLLBACK'); throw e; }
+    finally { db.exec('PRAGMA foreign_keys = ON'); }
+    console.log('Database upgraded: partner role added.');
+  }
 }
+db.exec(`CREATE TABLE IF NOT EXISTS task_partners (
+  task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  user_id INTEGER NOT NULL REFERENCES users(id),
+  PRIMARY KEY (task_id, user_id)
+)`);
 if (db.prepare('SELECT COUNT(*) n FROM categories').get().n === 0) {
   const ins = db.prepare('INSERT INTO categories (name) VALUES (?)');
   for (const c of ['Sales Tax', 'Withholding Tax', 'Income Tax', 'Annex H', 'Provincial Sales Tax', 'SECP / Corporate', 'Bookkeeping', 'Payroll', 'Audit', 'Other']) ins.run(c);
@@ -266,9 +294,9 @@ function canManageUser(me, target) {
   if (me.role === 'manager') return target.role === 'staff' && target.manager_id === me.id;
   return false;
 }
-// Clients this person may see: owner all; manager — his clients or clients of his staff; staff — clients assigned to him
+// Clients this person may see: owner and partners all (partners read-only); manager — his clients or clients of his staff; staff — clients assigned to him
 function visibleClientIds(me) {
-  if (me.role === 'owner') return null;
+  if (me.role === 'owner' || me.role === 'partner') return null;
   if (me.role === 'manager') {
     const team = teamIds(me);
     return db.prepare(`SELECT id FROM clients WHERE manager_id = ? UNION
@@ -279,25 +307,55 @@ function visibleClientIds(me) {
 function canSeeClient(me, c) { if (!c) return false; const ids = visibleClientIds(me); return ids === null || ids.includes(c.id); }
 function canEditClient(me, c) { return me.role === 'owner' || (me.role === 'manager' && c.manager_id === me.id); }
 
-function visibleTask(me, t) {
-  if (!t) return false;
-  if (me.role === 'owner') return true;
-  if (me.role === 'manager') return teamIds(me).includes(t.assignee_id) || t.created_by === me.id;
-  return t.assignee_id === me.id;
+/* Task visibility
+ *   personal — only the person who created it, nobody else (the owner included)
+ *   business — owner: all; anyone: tasks assigned to or created by them;
+ *              partner: also tasks they are listed on as an involved partner;
+ *              manager: also tasks of their own staff */
+function partnerMap() {
+  const m = new Map();
+  for (const r of db.prepare('SELECT tp.task_id, tp.user_id, u.name FROM task_partners tp JOIN users u ON u.id = tp.user_id ORDER BY u.name').all()) {
+    if (!m.has(r.task_id)) m.set(r.task_id, []);
+    m.get(r.task_id).push({ id: r.user_id, name: r.name });
+  }
+  return m;
 }
-function canEditTask(me, t) {
-  if (me.role === 'owner') return true;
-  if (me.role === 'manager') return t.created_by === me.id || (t.assignee_id !== me.id && teamIds(me).includes(t.assignee_id));
+const taskPartners = id => db.prepare('SELECT tp.user_id id, u.name FROM task_partners tp JOIN users u ON u.id = tp.user_id WHERE tp.task_id = ? ORDER BY u.name').all(id);
+function visibleTask(me, t, partners) {
+  if (!t) return false;
+  if (t.visibility === 'personal') return t.created_by === me.id;
+  if (me.role === 'owner' || t.assignee_id === me.id || t.created_by === me.id) return true;
+  if (me.role === 'partner') return (partners ?? taskPartners(t.id)).some(p => p.id === me.id);
+  if (me.role === 'manager') return teamIds(me).includes(t.assignee_id);
   return false;
 }
-function taskOut(t, me) {
+function canEditTask(me, t) {
+  if (t.visibility === 'personal') return t.created_by === me.id;
+  if (me.role === 'owner' || t.created_by === me.id) return true;
+  if (me.role === 'manager') return t.assignee_id !== me.id && teamIds(me).includes(t.assignee_id);
+  return false;
+}
+function taskOut(t, me, partners) {
+  const ps = partners ?? taskPartners(t.id);
   return {
     id: t.id, title: t.title, notes: t.notes, priority: t.priority, due: t.due, status: t.status, progress: t.progress,
     assigneeId: t.assignee_id, assigneeName: t.assignee_name, createdBy: t.created_by, createdByName: t.creator_name,
     categoryId: t.category_id, categoryName: t.category_name || '', clientId: t.client_id, clientName: t.client_name || '',
-    recurringId: t.recurring_id, period: t.period,
+    recurringId: t.recurring_id, period: t.period, visibility: t.visibility || 'business',
+    partnerIds: ps.map(p => p.id), partnerNames: ps.map(p => p.name),
     createdAt: t.created_at, updatedAt: t.updated_at, doneAt: t.done_at, canEdit: canEditTask(me, t),
   };
+}
+function checkPartners(list, excludeId) {
+  if (list == null) return [];
+  if (!Array.isArray(list)) throw bad('Partners list is not valid.');
+  const ids = [...new Set(list.map(Number))].filter(id => id !== excludeId);
+  for (const id of ids) if (!db.prepare("SELECT 1 FROM users WHERE id = ? AND role = 'partner' AND active = 1 AND deleted = 0").get(id)) throw bad('One of the chosen partners is not active.');
+  return ids;
+}
+function setTaskPartners(taskId, ids) {
+  db.prepare('DELETE FROM task_partners WHERE task_id = ?').run(taskId);
+  const ins = db.prepare('INSERT INTO task_partners (task_id, user_id) VALUES (?,?)'); for (const id of ids) ins.run(taskId, id);
 }
 const TASK_SELECT = `SELECT t.*, a.name assignee_name, c.name creator_name, k.name category_name, cl.name client_name FROM tasks t
   JOIN users a ON a.id = t.assignee_id JOIN users c ON c.id = t.created_by
@@ -370,18 +428,19 @@ route('POST', '/api/me/password', true, async (req, res, body, me) => {
 /* ---- people ---- */
 route('GET', '/api/users', true, async (req, res, body, me) => {
   let rows;
-  if (me.role === 'owner') rows = db.prepare('SELECT * FROM users WHERE deleted = 0 ORDER BY role, name').all();
-  else if (me.role === 'manager') rows = db.prepare("SELECT * FROM users WHERE deleted = 0 AND (id = ? OR (manager_id = ? AND role = 'staff')) ORDER BY name").all(me.id, me.id);
+  // Partners can assign to anyone, so they see everyone. Managers also see partners, to list them on tasks.
+  if (me.role === 'owner' || me.role === 'partner') rows = db.prepare('SELECT * FROM users WHERE deleted = 0 ORDER BY role, name').all();
+  else if (me.role === 'manager') rows = db.prepare("SELECT * FROM users WHERE deleted = 0 AND (id = ? OR (manager_id = ? AND role = 'staff') OR (role = 'partner' AND active = 1)) ORDER BY name").all(me.id, me.id);
   else rows = [me];
   send(res, 200, { users: rows.map(publicUser) });
 });
 route('POST', '/api/users', true, async (req, res, body, me) => {
-  if (me.role === 'staff') throw new HttpError(403, 'Staff cannot add people.');
+  if (me.role !== 'owner' && me.role !== 'manager') throw new HttpError(403, 'Only the owner and managers can add people.');
   const name = str(body.name, 80, 'Name'); const username = str(body.username, 40, 'Login ID'); const title = str(body.title, 60, 'Job title');
   const role = me.role === 'owner' ? body.role : 'staff';
   if (!name) throw bad('Enter a name.');
   if (!/^[A-Za-z0-9._-]{3,40}$/.test(username)) throw bad('Login ID must be 3–40 letters, numbers, dots, dashes or underscores.');
-  if (!['manager', 'staff'].includes(role)) throw bad('Role must be manager or staff.');
+  if (!['partner', 'manager', 'staff'].includes(role)) throw bad('Role must be partner, manager or staff.');
   const p = passwordProblem(body.password); if (p) throw bad(p);
   let managerId = null;
   if (role === 'staff') {
@@ -433,7 +492,8 @@ route('DELETE', '/api/users/:id', true, async (req, res, body, me, params) => {
   if (target.role === 'manager' && db.prepare('SELECT 1 FROM users WHERE manager_id = ? AND deleted = 0').get(target.id))
     throw bad('Move this manager\'s staff to another manager first.');
   const n = sql => db.prepare(sql).get(target.id).n;
-  const openTasks = n("SELECT COUNT(*) n FROM tasks WHERE assignee_id = ? AND status <> 'done'");
+  // Personal tasks are never handed over; they stay private and hidden.
+  const openTasks = n("SELECT COUNT(*) n FROM tasks WHERE assignee_id = ? AND status <> 'done' AND visibility = 'business'");
   const rules = n('SELECT COUNT(*) n FROM recurring WHERE assignee_id = ?');
   const managed = n('SELECT COUNT(*) n FROM clients WHERE manager_id = ?');
   const assigned = n('SELECT COUNT(*) n FROM client_staff WHERE user_id = ?');
@@ -444,14 +504,23 @@ route('DELETE', '/api/users/:id', true, async (req, res, body, me, params) => {
     const team = teamIds(me);
     if (team && !team.includes(to.id)) throw bad('Choose someone in your own team.');
     if (target.role === 'manager' && to.role !== 'manager') throw bad('Choose another manager to take over.');
+    if (target.role === 'partner' && to.role !== 'partner') throw bad('Choose another partner to take over.');
   }
   tx(() => {
     if (to) {
-      db.prepare("UPDATE tasks SET assignee_id = ?, updated_at = ?, updated_by = ? WHERE assignee_id = ? AND status <> 'done'").run(to.id, Date.now(), me.id, target.id);
+      db.prepare("UPDATE tasks SET assignee_id = ?, updated_at = ?, updated_by = ? WHERE assignee_id = ? AND status <> 'done' AND visibility = 'business'").run(to.id, Date.now(), me.id, target.id);
       db.prepare('UPDATE recurring SET assignee_id = ? WHERE assignee_id = ?').run(to.id, target.id);
       if (managed) db.prepare('UPDATE clients SET manager_id = ?, updated_at = ? WHERE manager_id = ?').run(to.id, Date.now(), target.id);
       if (to.role === 'staff') db.prepare('INSERT OR IGNORE INTO client_staff (client_id, user_id) SELECT client_id, ? FROM client_staff WHERE user_id = ?').run(to.id, target.id);
+      if (to.role === 'partner') {
+        db.prepare("INSERT OR IGNORE INTO task_partners (task_id, user_id) SELECT tp.task_id, ? FROM task_partners tp JOIN tasks t ON t.id = tp.task_id WHERE tp.user_id = ? AND t.status <> 'done'").run(to.id, target.id);
+        for (const r of db.prepare("SELECT id, partner_ids FROM recurring WHERE partner_ids <> ''").all()) {
+          const ids = r.partner_ids.split(',').map(Number);
+          if (ids.includes(target.id)) db.prepare('UPDATE recurring SET partner_ids = ? WHERE id = ?').run([...new Set(ids.map(i => i === target.id ? to.id : i))].join(','), r.id);
+        }
+      }
     }
+    db.prepare("DELETE FROM task_partners WHERE user_id = ? AND task_id IN (SELECT id FROM tasks WHERE status <> 'done')").run(target.id);
     db.prepare('DELETE FROM client_staff WHERE user_id = ?').run(target.id);
     db.prepare('DELETE FROM sessions WHERE user_id = ?').run(target.id);
     db.prepare('UPDATE users SET deleted = 1, active = 0, username = ? WHERE id = ?').run(`deleted-${target.id}-${target.username}`.slice(0, 60), target.id);
@@ -525,7 +594,7 @@ function setClientStaff(me, clientId, managerId, staffIds) {
   const ins = db.prepare('INSERT INTO client_staff VALUES (?,?)'); for (const id of ids) ins.run(clientId, id);
 }
 route('POST', '/api/clients', true, async (req, res, body, me) => {
-  if (me.role === 'staff') throw new HttpError(403, 'Staff cannot add clients.');
+  if (me.role !== 'owner' && me.role !== 'manager') throw new HttpError(403, 'Only the owner and managers can add clients.');
   if (me.role === 'manager') body.managerId = me.id;
   if (!('name' in body)) throw bad('Enter the client name.');
   const f = clientFields(body, me, null);
@@ -597,21 +666,21 @@ route('GET', '/api/clients/:id/access-log', true, async (req, res, body, me, par
 
 /* ---- tasks ---- */
 route('GET', '/api/tasks', true, async (req, res, body, me) => {
-  let rows;
-  if (me.role === 'owner') rows = db.prepare(TASK_SELECT + ' ORDER BY t.created_at DESC').all();
-  else {
-    const ids = teamIds(me);
-    rows = db.prepare(`${TASK_SELECT} WHERE t.assignee_id IN (${ids.map(() => '?').join(',')})` + (me.role === 'manager' ? ' OR t.created_by = ?' : '') + ' ORDER BY t.created_at DESC')
-      .all(...ids, ...(me.role === 'manager' ? [me.id] : []));
-  }
-  send(res, 200, { tasks: rows.map(t => taskOut(t, me)) });
+  const pm = partnerMap();
+  const rows = db.prepare(TASK_SELECT + ' ORDER BY t.created_at DESC').all().filter(t => visibleTask(me, t, pm.get(t.id) || []));
+  send(res, 200, { tasks: rows.map(t => taskOut(t, me, pm.get(t.id) || [])) });
 });
+// Owner: anyone. Partner: any partner, manager or staff. Manager: himself and his own staff.
 function checkAssignee(me, id) {
-  const a = db.prepare('SELECT * FROM users WHERE id = ? AND active = 1').get(Number(id));
-  const team = teamIds(me);
-  if (!a || (team && !team.includes(a.id))) throw bad('You can only assign tasks to your own team.');
-  return a;
+  const a = db.prepare('SELECT * FROM users WHERE id = ? AND active = 1 AND deleted = 0').get(Number(id));
+  if (!a) throw bad('Choose who this task is for.');
+  if (me.role === 'owner') return a;
+  if (me.role === 'partner') { if (a.role === 'owner') throw bad('Partners can assign to partners, managers and staff.'); return a; }
+  if (me.role === 'manager' && teamIds(me).includes(a.id)) return a;
+  throw bad('You can only assign tasks to your own team.');
 }
+const canHavePersonal = me => ['owner', 'partner', 'manager'].includes(me.role);
+const NEED_PARTNER = 'Business tasks you add for yourself need at least one partner who can follow them.';
 function checkCategory(v) { const id = intOrNull(v); if (id === null) return null; if (!db.prepare('SELECT 1 FROM categories WHERE id = ?').get(id)) throw bad('Choose a valid category.'); return id; }
 function checkClient(me, v) { const id = intOrNull(v); if (id === null) return null; const c = getClient(id); if (!canSeeClient(me, c) || !c.active) throw bad('Choose one of your clients.'); return id; }
 
@@ -621,12 +690,25 @@ route('POST', '/api/tasks', true, async (req, res, body, me) => {
   const notes = str(body.notes, 2000, 'Notes'); const due = str(body.due, 10, 'Due date');
   const priority = ['high', 'medium', 'low'].includes(body.priority) ? body.priority : 'medium';
   if (!isDate(due)) throw bad('Due date is not valid.');
-  const a = checkAssignee(me, body.assigneeId);
+  const visibility = body.visibility === 'personal' ? 'personal' : 'business';
+  let a, partners;
+  if (visibility === 'personal') {
+    if (!canHavePersonal(me)) throw new HttpError(403, 'Personal tasks are not available for staff.');
+    a = me; partners = []; // a personal task is always your own and nobody else sees it
+  } else {
+    a = checkAssignee(me, body.assigneeId);
+    partners = checkPartners(body.partnerIds, null);
+    if (me.role === 'manager' && a.id === me.id && !partners.length) throw bad(NEED_PARTNER);
+  }
   const cat = checkCategory(body.categoryId); const cli = checkClient(me, body.clientId);
   const now = Date.now();
-  const r = db.prepare(`INSERT INTO tasks (title,notes,priority,due,assignee_id,created_by,created_at,updated_at,updated_by,category_id,client_id)
-                        VALUES (?,?,?,?,?,?,?,?,?,?,?)`).run(title, notes, priority, due, a.id, me.id, now, now, me.id, cat, cli);
-  send(res, 201, { task: taskOut(db.prepare(TASK_SELECT + ' WHERE t.id = ?').get(r.lastInsertRowid), me) });
+  const id = tx(() => {
+    const r = db.prepare(`INSERT INTO tasks (title,notes,priority,due,assignee_id,created_by,created_at,updated_at,updated_by,category_id,client_id,visibility)
+                          VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`).run(title, notes, priority, due, a.id, me.id, now, now, me.id, cat, cli, visibility);
+    setTaskPartners(Number(r.lastInsertRowid), partners);
+    return Number(r.lastInsertRowid);
+  });
+  send(res, 201, { task: taskOut(db.prepare(TASK_SELECT + ' WHERE t.id = ?').get(id), me) });
 });
 route('PATCH', '/api/tasks/:id', true, async (req, res, body, me, params) => {
   const t = db.prepare(TASK_SELECT + ' WHERE t.id = ?').get(Number(params.id));
@@ -652,11 +734,28 @@ route('PATCH', '/api/tasks/:id', true, async (req, res, body, me, params) => {
     if (f === 'categoryId') sets.category_id = checkCategory(body.categoryId);
     if (f === 'clientId') sets.client_id = (intOrNull(body.clientId) === t.client_id) ? t.client_id : checkClient(me, body.clientId);
   }
-  const keys = Object.keys(sets);
-  if (keys.length) {
-    sets.updated_at = Date.now(); sets.updated_by = me.id; keys.push('updated_at', 'updated_by');
-    db.prepare(`UPDATE tasks SET ${keys.map(k => k + ' = ?').join(', ')} WHERE id = ?`).run(...keys.map(k => sets[k]), t.id);
+  if ('visibility' in body) {
+    if (!['business', 'personal'].includes(body.visibility)) throw bad('Choose Business or Personal.');
+    if (body.visibility !== t.visibility && t.created_by !== me.id) throw new HttpError(403, 'Only the person who added this task can change Business or Personal.');
+    if (body.visibility === 'personal' && !canHavePersonal(me)) throw new HttpError(403, 'Personal tasks are not available for staff.');
+    sets.visibility = body.visibility;
   }
+  if ('partnerIds' in body && !full) throw new HttpError(403, 'You can update status and progress only.');
+  const vis = sets.visibility ?? t.visibility, assignee = sets.assignee_id ?? t.assignee_id;
+  let partners = 'partnerIds' in body ? checkPartners(body.partnerIds, null) : taskPartners(t.id).map(p => p.id);
+  if (vis === 'personal') {
+    if (assignee !== t.created_by) throw bad('A personal task can only be for the person who added it.');
+    partners = [];
+  } else if (me.role === 'manager' && t.created_by === me.id && assignee === me.id && !partners.length &&
+             ('partnerIds' in body || 'visibility' in body || 'assigneeId' in body)) throw bad(NEED_PARTNER);
+  const keys = Object.keys(sets);
+  tx(() => {
+    if (keys.length) {
+      sets.updated_at = Date.now(); sets.updated_by = me.id; keys.push('updated_at', 'updated_by');
+      db.prepare(`UPDATE tasks SET ${keys.map(k => k + ' = ?').join(', ')} WHERE id = ?`).run(...keys.map(k => sets[k]), t.id);
+    }
+    if ('partnerIds' in body || vis === 'personal') setTaskPartners(t.id, partners);
+  });
   send(res, 200, { task: taskOut(db.prepare(TASK_SELECT + ' WHERE t.id = ?').get(t.id), me) });
 });
 route('DELETE', '/api/tasks/:id', true, async (req, res, body, me, params) => {
@@ -709,8 +808,11 @@ function generateRecurring(onlyId) {
       for (const d of list) {
         const title = [r.title, client?.name, d.label].filter(Boolean).join(' — ');
         const now = Date.now();
-        db.prepare(`INSERT INTO tasks (title,notes,priority,due,assignee_id,created_by,created_at,updated_at,updated_by,category_id,client_id,recurring_id,period)
+        const ins = db.prepare(`INSERT INTO tasks (title,notes,priority,due,assignee_id,created_by,created_at,updated_at,updated_by,category_id,client_id,recurring_id,period)
                     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(title, r.notes, r.priority, d.due, r.assignee_id, r.created_by, now, now, r.created_by, r.category_id, r.client_id, r.id, d.period);
+        const pids = (r.partner_ids || '').split(',').filter(Boolean).map(Number)
+          .filter(id => db.prepare("SELECT 1 FROM users WHERE id = ? AND role = 'partner' AND active = 1 AND deleted = 0").get(id));
+        setTaskPartners(Number(ins.lastInsertRowid), pids);
         made++;
       }
       db.prepare('UPDATE recurring SET last_due = ? WHERE id = ?').run(list[list.length - 1].due, r.id);
@@ -725,12 +827,22 @@ function ruleOut(r, me) {
     assigneeId: r.assignee_id, assigneeName: r.assignee_name, frequency: r.frequency, dueDay: r.due_day, dueMonth: r.due_month,
     months: r.months ? r.months.split(',').map(Number) : [], leadDays: r.lead_days, priority: r.priority, notes: r.notes, active: !!r.active,
     lastDue: r.last_due, nextDue: r.active ? nextDue(r) : '', createdBy: r.created_by, canEdit: canEditRule(me, r),
+    partnerIds: (r.partner_ids || '').split(',').filter(Boolean).map(Number),
   };
 }
 const RULE_SELECT = `SELECT r.*, k.name category_name, c.name client_name, a.name assignee_name FROM recurring r
   LEFT JOIN categories k ON k.id = r.category_id LEFT JOIN clients c ON c.id = r.client_id JOIN users a ON a.id = r.assignee_id`;
-function canSeeRule(me, r) { if (me.role === 'owner') return true; if (me.role === 'manager') return r.created_by === me.id || teamIds(me).includes(r.assignee_id); return false; }
-function canEditRule(me, r) { if (me.role === 'owner') return true; return me.role === 'manager' && (r.created_by === me.id || (r.assignee_id !== me.id && teamIds(me).includes(r.assignee_id))); }
+function canSeeRule(me, r) {
+  if (me.role === 'owner') return true;
+  if (r.created_by === me.id || r.assignee_id === me.id) return true;
+  if (me.role === 'partner') return (r.partner_ids || '').split(',').map(Number).includes(me.id);
+  if (me.role === 'manager') return teamIds(me).includes(r.assignee_id);
+  return false;
+}
+function canEditRule(me, r) {
+  if (me.role === 'owner' || (me.role !== 'staff' && r.created_by === me.id)) return true;
+  return me.role === 'manager' && r.assignee_id !== me.id && teamIds(me).includes(r.assignee_id);
+}
 function ruleFields(body, me, cur) {
   const f = {};
   if ('title' in body) { f.title = str(body.title, 120, 'Task name'); if (!f.title) throw bad('Enter the task name.'); }
@@ -748,6 +860,7 @@ function ruleFields(body, me, cur) {
   if ('priority' in body) { if (!['high', 'medium', 'low'].includes(body.priority)) throw bad('Unknown priority.'); f.priority = body.priority; }
   if ('notes' in body) f.notes = str(body.notes, 2000, 'Instructions');
   if ('active' in body) f.active = body.active ? 1 : 0;
+  if ('partnerIds' in body) f.partner_ids = checkPartners(body.partnerIds, null).join(',');
   const freq = f.frequency ?? cur?.frequency;
   if (freq === 'annual' && !(f.due_month ?? cur?.due_month)) throw bad('Choose the month the yearly task is due.');
   if (freq === 'quarterly' && !(f.months ?? cur?.months)) throw bad('Choose the months the quarterly task is due.');

@@ -5,6 +5,7 @@ A web portal where every employee signs in with their own **Login ID and passwor
 | Role | Sees | Can do |
 |---|---|---|
 | **Owner** | Every manager, every staff member, every task | Add managers and staff, move staff between managers, assign tasks to anyone, reset passwords, deactivate accounts |
+| **Partner** | Business tasks they assigned, are assigned, or are listed on as a partner; all clients (view only) | Assign tasks to other partners, managers and staff; follow tasks they are involved in; keep a private feed |
 | **Manager** | Himself, the staff who report to him, and the clients assigned to him or his staff | Add staff to his own team, assign tasks to them, edit or delete those tasks, reset their passwords |
 | **Staff** | Only tasks assigned to him, and the clients assigned to him | Mark tasks Started or Done, add a progress note, view the portal logins of his clients. Cannot create, edit, reassign or delete tasks or clients |
 
@@ -65,6 +66,12 @@ Run it as a service (systemd or pm2) and put Nginx or Caddy in front for HTTPS. 
 **Always use HTTPS in production**, so passwords are encrypted on the way to the server.
 
 ---
+
+## My feed and personal tasks
+
+Owner, partners and managers have a **My feed** tab for their own to-dos. Each one is **Business** or **Personal**.
+Personal tasks are seen only by the person who added them, not by the owner or anyone else.
+Business tasks a manager adds for himself must name at least one partner, who can then follow them.
 
 ## Client portal passwords (CRED_KEY)
 

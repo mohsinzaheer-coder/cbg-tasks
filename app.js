@@ -3,7 +3,7 @@
   const $ = s => document.querySelector(s);
   const STATUS = [['todo', 'To do'], ['doing', 'In progress'], ['done', 'Done']];
   const PRI = { high: 0, medium: 1, low: 2 };
-  const ROLE = { owner: 'Owner', manager: 'Manager', staff: 'Staff' };
+  const ROLE = { owner: 'Owner', partner: 'Partner', manager: 'Manager', staff: 'Staff' };
   const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
   const state = { me: null, config: {}, users: [], tasks: [], clients: [], categories: [], rules: [], tab: 'tasks', confirm: null, editing: null, clientId: null };
 
@@ -79,20 +79,29 @@
   });
   $('#logout').onclick = async () => { try { await api('POST', '/api/logout'); } catch { } state.me = null; show('login'); $('#lUser').focus(); };
 
+  const mgmt = () => state.me && (state.me.role === 'owner' || state.me.role === 'manager');
+  const seesAll = () => state.me && (state.me.role === 'owner' || state.me.role === 'partner');
   async function enterApp() {
     show('app'); const me = state.me;
     $('#meName').textContent = me.name; $('#meRole').textContent = ROLE[me.role] + (me.title && me.title !== ROLE[me.role] ? ' · ' + me.title : '');
-    document.querySelectorAll('#tabs [data-role="lead"]').forEach(b => b.hidden = !lead());
-    $('#newTaskBtn').hidden = !lead(); $('#fPersonWrap').hidden = !lead();
-    $('#newClientBtn').hidden = !lead(); $('#cMgrWrap').hidden = me.role !== 'owner';
+    document.querySelectorAll('#tabs [data-role="assign"]').forEach(b => b.hidden = !lead());
+    document.querySelectorAll('#tabs [data-role="mgmt"]').forEach(b => b.hidden = !mgmt());
+    $('#newTaskBtn').hidden = !lead(); $('#fPersonWrap').hidden = !lead(); $('#fPartnerWrap').hidden = !seesAll();
+    $('#newClientBtn').hidden = !mgmt(); $('#cMgrWrap').hidden = !seesAll();
     $('#credsOff').hidden = !!state.config.credsEnabled;
-    $('#tasksTitle').textContent = me.role === 'staff' ? 'My tasks' : me.role === 'manager' ? 'My team\'s tasks' : 'All tasks';
-    $('#tasksSub').textContent = me.role === 'staff' ? 'Tasks assigned to you. Update the status as you go.' : me.role === 'manager' ? 'Tasks for you and the staff who report to you.' : 'Every task across all managers and staff.';
-    $('#clientsSub').textContent = me.role === 'owner' ? 'All clients, their registrations and portal logins.' : me.role === 'manager' ? 'Clients assigned to you and your staff.' : 'Clients you work on.';
-    $('#peopleSub').textContent = me.role === 'owner' ? 'Managers and the staff who report to each of them.' : 'The staff who report to you.';
+    $('#tasksTitle').textContent = { staff: 'My tasks', manager: 'My team\'s tasks', partner: 'Tasks', owner: 'All tasks' }[me.role];
+    $('#tasksSub').textContent = {
+      staff: 'Tasks assigned to you. Update the status as you go.',
+      manager: 'Tasks for you and the staff who report to you.',
+      partner: 'Business tasks you assigned, that are assigned to you, or that you are involved in as a partner.',
+      owner: 'Every business task across the firm. Personal tasks stay private to the person who added them.',
+    }[me.role];
+    $('#feedSubBiz').textContent = me.role === 'manager' ? 'Business tasks you add here must name at least one partner, who can then follow them.' : 'Business tasks you add here can be shared with partners.';
+    $('#clientsSub').textContent = { owner: 'All clients, their registrations and portal logins.', partner: 'All clients and their portal logins (view only).', manager: 'Clients assigned to you and your staff.', staff: 'Clients you work on.' }[me.role];
+    $('#peopleSub').textContent = me.role === 'owner' ? 'Partners, managers, and the staff who report to each manager.' : 'The staff who report to you.';
     $('#newPersonBtn').textContent = me.role === 'owner' ? '+ Add person' : '+ Add staff member';
     $('#catPanel').hidden = me.role !== 'owner';
-    if (!lead() && ['recurring', 'people'].includes(state.tab)) state.tab = 'tasks';
+    if ((!lead() && ['recurring', 'feed'].includes(state.tab)) || (!mgmt() && state.tab === 'people')) state.tab = 'tasks';
     setTab(state.tab);
     await refresh();
   }
@@ -111,13 +120,15 @@
   function setTab(t) {
     state.tab = t;
     document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === t));
-    for (const p of ['tasks', 'clients', 'recurring', 'people']) $('#' + p + 'Page').hidden = p !== t;
+    for (const p of ['tasks', 'feed', 'clients', 'recurring', 'people']) $('#' + p + 'Page').hidden = p !== t;
   }
   $('#tabs').addEventListener('click', e => { const b = e.target.closest('button[data-tab]'); if (b) { setTab(b.dataset.tab); render(); } });
   function render() {
-    renderFilters(); renderTasks(); renderClients();
-    if (lead()) { renderRules(); renderPeople(); }
+    renderFilters(); renderBoards(); renderClients();
+    if (lead()) renderRules();
+    if (mgmt()) renderPeople();
   }
+  function renderBoards() { renderTasks(); if (lead()) renderFeed(); }
 
   /* ---------- filters ---------- */
   function fillSelect(sel, first, items) {
@@ -125,38 +136,64 @@
     for (const [v, t] of items) opt(sel, String(v), t);
     sel.value = [...sel.options].some(o => o.value === keep) ? keep : '';
   }
+  // The people this user may pick, grouped the same way the server allows assigning
+  function addPeopleOptions(sel, forFilter) {
+    const me = state.me; const active = state.users.filter(u => u.active);
+    const label = u => u.name + (u.title ? ' · ' + u.title : '');
+    if (me.role === 'staff') return;
+    if (me.role === 'manager') {
+      for (const u of active.filter(u => u.id === me.id || (u.role === 'staff' && u.managerId === me.id))) opt(sel, u.id, u.id === me.id ? u.name + ' (me)' : label(u));
+      return;
+    }
+    opt(sel, me.id, forFilter ? 'My own tasks' : me.name + ' (me)');
+    const partners = active.filter(u => u.role === 'partner' && u.id !== me.id);
+    if (partners.length) { const g = el('optgroup'); g.label = 'Partners'; for (const p of partners) { const o = el('option', null, label(p)); o.value = p.id; g.append(o); } sel.append(g); }
+    for (const m of active.filter(u => u.role === 'manager')) {
+      const g = el('optgroup'); g.label = m.name + '’s team';
+      if (forFilter) { const o1 = el('option', null, 'Whole team of ' + m.name); o1.value = 'team:' + m.id; g.append(o1); }
+      const om = el('option', null, m.name + ' (manager)'); om.value = m.id; g.append(om);
+      for (const s of active.filter(u => u.role === 'staff' && u.managerId === m.id)) { const o = el('option', null, label(s)); o.value = s.id; g.append(o); }
+      sel.append(g);
+    }
+  }
   function renderFilters() {
     const sel = $('#fPerson'); const keep = sel.value;
-    sel.replaceChildren(); opt(sel, '', 'Everyone I can see');
-    const active = state.users.filter(u => u.active);
-    if (state.me.role === 'owner') {
-      opt(sel, state.me.id, 'My own tasks');
-      for (const m of active.filter(u => u.role === 'manager')) {
-        const g = el('optgroup'); g.label = m.name + '’s team';
-        const o1 = el('option', null, 'Whole team of ' + m.name); o1.value = 'team:' + m.id; g.append(o1);
-        const o2 = el('option', null, m.name + ' (manager)'); o2.value = String(m.id); g.append(o2);
-        for (const s of active.filter(u => u.managerId === m.id)) { const o = el('option', null, s.name); o.value = String(s.id); g.append(o); }
-        sel.append(g);
-      }
-    } else for (const u of active) opt(sel, u.id, u.id === state.me.id ? u.name + ' (me)' : u.name);
+    sel.replaceChildren(); opt(sel, '', 'Everyone I can see'); addPeopleOptions(sel, true);
     sel.value = [...sel.options].some(o => o.value === keep) ? keep : '';
+    fillSelect($('#fPartner'), 'Any partner', state.users.filter(u => u.role === 'partner').map(u => [u.id, u.name]));
     fillSelect($('#fClient'), 'All clients', state.clients.filter(c => c.active).map(c => [c.id, c.name]));
     fillSelect($('#fCat'), 'All categories', state.categories.map(c => [c.id, c.name]));
-    if (state.me.role === 'owner') fillSelect($('#cMgr'), 'All managers', state.users.filter(u => u.role === 'manager').map(u => [u.id, u.name]));
+    if (seesAll()) fillSelect($('#cMgr'), 'All managers', state.users.filter(u => u.role === 'manager').map(u => [u.id, u.name]));
   }
 
   /* ---------- tasks ---------- */
   function filteredTasks() {
-    const p = $('#fPerson').value, cl = $('#fClient').value, ct = $('#fCat').value, pri = $('#fPri').value, q = $('#fText').value.trim().toLowerCase();
+    const p = $('#fPerson').value, pt = $('#fPartner').value, cl = $('#fClient').value, ct = $('#fCat').value, pri = $('#fPri').value, q = $('#fText').value.trim().toLowerCase();
     return state.tasks.filter(t => {
+      if (t.visibility === 'personal') return false; // personal tasks live only in My feed
       if (p.startsWith('team:')) { const mid = Number(p.slice(5)); const u = userById(t.assigneeId); if (!(t.assigneeId === mid || (u && u.managerId === mid))) return false; }
       else if (p && t.assigneeId !== Number(p)) return false;
+      if (pt && !t.partnerIds.includes(Number(pt))) return false;
       if (cl && t.clientId !== Number(cl)) return false;
       if (ct && t.categoryId !== Number(ct)) return false;
       if (pri && t.priority !== pri) return false;
-      if (q && !`${t.title} ${t.notes} ${t.progress} ${t.assigneeName} ${t.clientName} ${t.categoryName}`.toLowerCase().includes(q)) return false;
+      if (q && !`${t.title} ${t.notes} ${t.progress} ${t.assigneeName} ${t.clientName} ${t.categoryName} ${t.partnerNames.join(' ')}`.toLowerCase().includes(q)) return false;
       return true;
     });
+  }
+  function drawLanes(host, tasks, emptyText) {
+    host.replaceChildren();
+    for (const [key, label] of STATUS) {
+      const lane = el('section', 'lane'); lane.dataset.s = key;
+      const list = tasks.filter(t => t.status === key).sort(key === 'done' ? (a, b) => (b.doneAt || 0) - (a.doneAt || 0)
+        : (a, b) => (isLate(b) - isLate(a)) || (a.due || '9999').localeCompare(b.due || '9999') || (PRI[a.priority] - PRI[b.priority]));
+      const h = el('div', 'lane-h'); h.append(el('h3', null, label), el('span', null, String(list.length))); lane.append(h);
+      const shown = key === 'done' ? list.slice(0, 40) : list;
+      if (!list.length) lane.append(el('div', 'lane-empty', key === 'todo' && emptyText ? emptyText : 'Nothing here'));
+      for (const t of shown) lane.append(card(t));
+      if (list.length > shown.length) lane.append(el('div', 'lane-empty', `Showing the latest ${shown.length} of ${list.length} done tasks`));
+      host.append(lane);
+    }
   }
   function renderTasks() {
     const tasks = filteredTasks();
@@ -164,30 +201,31 @@
     $('#sDoing').textContent = tasks.filter(t => t.status === 'doing').length;
     $('#sLate').textContent = tasks.filter(isLate).length;
     $('#sDone').textContent = tasks.filter(t => t.status === 'done').length;
-    const host = $('#lanes'); host.replaceChildren();
-    for (const [key, label] of STATUS) {
-      const lane = el('section', 'lane'); lane.dataset.s = key;
-      const list = tasks.filter(t => t.status === key).sort(key === 'done' ? (a, b) => (b.doneAt || 0) - (a.doneAt || 0)
-        : (a, b) => (isLate(b) - isLate(a)) || (a.due || '9999').localeCompare(b.due || '9999') || (PRI[a.priority] - PRI[b.priority]));
-      const h = el('div', 'lane-h'); h.append(el('h3', null, label), el('span', null, String(list.length))); lane.append(h);
-      const shown = key === 'done' ? list.slice(0, 40) : list;
-      if (!list.length) lane.append(el('div', 'lane-empty', key === 'todo' && !state.tasks.length ? (lead() ? 'No tasks yet. Use “Assign task” to give someone work.' : 'No tasks assigned to you yet.') : 'Nothing here'));
-      for (const t of shown) lane.append(card(t));
-      if (list.length > shown.length) lane.append(el('div', 'lane-empty', `Showing the latest ${shown.length} of ${list.length} done tasks`));
-      host.append(lane);
-    }
+    const none = !state.tasks.some(t => t.visibility !== 'personal');
+    drawLanes($('#lanes'), tasks, none ? (lead() ? 'No tasks yet. Use “Assign task” to give someone work.' : 'No tasks assigned to you yet.') : null);
   }
+  function renderFeed() {
+    const ty = $('#feedType').value, q = $('#feedText').value.trim().toLowerCase();
+    const mineAll = state.tasks.filter(t => t.assigneeId === state.me.id);
+    const mine = mineAll.filter(t => (!ty || t.visibility === ty) && (!q || `${t.title} ${t.notes} ${t.progress} ${t.clientName}`.toLowerCase().includes(q)));
+    drawLanes($('#feedLanes'), mine, mineAll.length ? null : 'Nothing here yet. Use “Add my task” to add your first to-do.');
+  }
+  $('#feedType').addEventListener('change', renderFeed);
+  $('#feedText').addEventListener('input', renderFeed);
   function card(t) {
     const me = state.me; const mine = t.assigneeId === me.id;
     const c = el('article', 'card' + (isLate(t) ? ' overdue' : ''));
     const tags = el('div', 'meta');
+    if (t.visibility === 'personal') tags.append(el('span', 'chip personal', 'Personal · only you'));
     if (t.clientName) tags.append(el('span', 'chip client', t.clientName));
     if (t.categoryName) tags.append(el('span', 'chip', t.categoryName));
+    if (me.role === 'partner' && !mine && t.createdBy !== me.id && t.partnerIds.includes(me.id)) tags.append(el('span', 'chip watch', 'Following as partner'));
     if (t.recurringId) tags.append(el('span', 'repeat', '↻ Recurring'));
     if (tags.children.length) c.append(tags);
     c.append(el('p', 'card-t', t.title));
     if (t.notes) c.append(el('p', 'card-n', t.notes));
     if (t.progress) { const p = el('p', 'progress'); p.append(el('b', null, 'Progress'), document.createTextNode(t.progress)); c.append(p); }
+    if (t.partnerNames.length) { const p = el('p', 'partners-line'); p.append(document.createTextNode('Partners: '), el('b', null, t.partnerNames.join(', '))); c.append(p); }
     const m = el('div', 'meta');
     m.append(el('span', 'pill p-' + t.priority, t.priority));
     if (lead() || !mine) { const w = el('span', 'who'); w.append(el('span', 'av', initials(t.assigneeName)), document.createTextNode(mine ? 'Me' : t.assigneeName)); m.append(w); }
@@ -197,19 +235,19 @@
     if (!(mine || t.canEdit)) return c;
     const a = el('div', 'actions'); const key = 'task:' + t.id;
     if (state.confirm === key) {
-      const cf = el('div', 'confirm'); cf.append(el('span', null, 'Delete this task?'), btn('Delete', 'ghost danger', () => delTask(t)), btn('Keep', 'ghost', () => { state.confirm = null; renderTasks(); }));
+      const cf = el('div', 'confirm'); cf.append(el('span', null, 'Delete this task?'), btn('Delete', 'ghost danger', () => delTask(t)), btn('Keep', 'ghost', () => { state.confirm = null; renderBoards(); }));
       a.append(cf); c.append(a); return c;
     }
     for (const [k] of STATUS) if (k !== t.status) a.append(btn(k === 'done' ? 'Mark done' : k === 'doing' ? 'Start' : 'Back to To do', 'ghost', () => patchTask(t, { status: k })));
     a.append(btn(t.progress ? 'Edit note' : 'Add note', 'ghost', () => openNote(t)));
     if (t.clientId && clientById(t.clientId)) a.append(btn('Client logins', 'ghost', () => { state.clientId = t.clientId; setTab('clients'); render(); }));
-    if (t.canEdit) a.append(btn('Edit', 'ghost', () => openTask(t)), btn('Delete', 'ghost danger', () => { state.confirm = key; renderTasks(); }));
+    if (t.canEdit) a.append(btn('Edit', 'ghost', () => openTask(t)), btn('Delete', 'ghost danger', () => { state.confirm = key; renderBoards(); }));
     c.append(a); return c;
   }
   async function patchTask(t, patch, msg) {
     try {
       const { task } = await api('PATCH', '/api/tasks/' + t.id, patch);
-      state.tasks = state.tasks.map(x => x.id === task.id ? task : x); renderTasks(); if (lead()) renderPeople();
+      state.tasks = state.tasks.map(x => x.id === task.id ? task : x); renderBoards(); if (mgmt()) renderPeople();
       toast(msg || (patch.status === 'done' ? 'Marked done' : patch.status === 'doing' ? 'Started' : 'Moved back to To do'));
       return true;
     } catch (err) { toast(err.message); return false; }
@@ -217,27 +255,22 @@
   async function delTask(t) {
     state.confirm = null;
     try { await api('DELETE', '/api/tasks/' + t.id); state.tasks = state.tasks.filter(x => x.id !== t.id); render(); toast('Task deleted'); }
-    catch (err) { toast(err.message); renderTasks(); }
+    catch (err) { toast(err.message); renderBoards(); }
   }
-  ['#fPerson', '#fClient', '#fCat', '#fPri'].forEach(s => $(s).addEventListener('change', renderTasks));
+  ['#fPerson', '#fPartner', '#fClient', '#fCat', '#fPri'].forEach(s => $(s).addEventListener('change', renderTasks));
   $('#fText').addEventListener('input', renderTasks);
 
   /* shared pickers */
-  function fillPeople(sel) {
-    sel.replaceChildren(); opt(sel, '', 'Choose a person');
-    const active = state.users.filter(u => u.active);
-    if (state.me.role === 'owner') {
-      opt(sel, state.me.id, state.me.name + ' (me)');
-      for (const m of active.filter(u => u.role === 'manager')) {
-        const g = el('optgroup'); g.label = m.name + '’s team';
-        const om = el('option', null, m.name + ' (manager)'); om.value = m.id; g.append(om);
-        for (const s of active.filter(u => u.managerId === m.id)) { const o = el('option', null, s.name + (s.title ? ' · ' + s.title : '')); o.value = s.id; g.append(o); }
-        sel.append(g);
-      }
-    } else for (const u of active) opt(sel, u.id, u.id === state.me.id ? u.name + ' (me)' : u.name + (u.title ? ' · ' + u.title : ''));
-  }
+  function fillPeople(sel) { sel.replaceChildren(); opt(sel, '', 'Choose a person'); addPeopleOptions(sel, false); }
   function fillClients(sel, includeId) { sel.replaceChildren(); opt(sel, '', 'No client (internal)'); for (const c of state.clients.filter(c => c.active || c.id === includeId)) opt(sel, c.id, c.name + (c.code ? ` (${c.code})` : '')); }
   function fillCats(sel) { sel.replaceChildren(); opt(sel, '', 'No category'); for (const c of state.categories) opt(sel, c.id, c.name); }
+  function fillPartnerChecks(box, selected) {
+    box.replaceChildren();
+    const ps = state.users.filter(u => u.role === 'partner' && u.active && u.id !== state.me.id);
+    if (!ps.length) box.append(el('span', 'help', state.me.role === 'partner' ? 'No other partners yet.' : 'No partners added yet. The owner adds them on the People tab.'));
+    for (const p of ps) { const l = el('label'); const i = el('input'); i.type = 'checkbox'; i.value = p.id; i.id = box.id + '-' + p.id; i.checked = selected.includes(p.id); l.append(i, document.createTextNode(p.name)); box.append(l); }
+  }
+  const checkedIds = box => [...box.querySelectorAll('input:checked')].map(i => Number(i.value));
   // When a client is chosen, pre-select a person who works on it
   function suggestPerson(clientSel, whoSel) {
     clientSel.onchange = () => {
@@ -247,31 +280,60 @@
     };
   }
 
-  /* task dialog */
-  function openTask(t) {
-    state.editing = t || null; $('#taskForm').reset(); showErr('#taskError');
+  /* task dialog: 'assign' gives work to someone; 'own' adds to my feed as Business or Personal */
+  let taskMode = 'assign';
+  function syncTaskType() {
+    const own = taskMode === 'own'; const personal = own && $('#tTypePer').checked;
+    $('#tTypeWrap').hidden = !own;
+    $('#tWhoWrap').hidden = own; $('#tWho').required = !own;
+    $('#tPartnersWrap').hidden = personal;
+    const needs = own && !personal && state.me.role === 'manager';
+    $('#tPartnersWrap').classList.toggle('required', needs);
+    $('#tPartnersHelp').textContent = needs ? 'Business tasks you add for yourself must name at least one partner, who can then follow them.'
+      : personal ? '' : 'Partners you tick can see and follow this task.';
+  }
+  document.querySelectorAll('input[name="tType"]').forEach(r => r.addEventListener('change', syncTaskType));
+  function openTask(t, mode) {
+    state.editing = t || null;
+    taskMode = t ? (t.assigneeId === state.me.id && t.createdBy === state.me.id ? 'own' : 'assign') : (mode || 'assign');
+    $('#taskForm').reset(); showErr('#taskError');
     fillCats($('#tCat')); fillClients($('#tClient'), t?.clientId); fillPeople($('#tWho'));
     suggestPerson($('#tClient'), $('#tWho'));
-    if (t) { $('#tTitle').value = t.title; $('#tWho').value = String(t.assigneeId); $('#tPri').value = t.priority; $('#tDue').value = t.due; $('#tNotes').value = t.notes; $('#tCat').value = t.categoryId ?? ''; $('#tClient').value = t.clientId ?? ''; }
-    else {
-      const fp = $('#fPerson').value; if (fp && !fp.startsWith('team:')) $('#tWho').value = fp;
+    fillPartnerChecks($('#tPartners'), t ? t.partnerIds : []);
+    if (t) {
+      $('#tTitle').value = t.title; $('#tWho').value = String(t.assigneeId); $('#tPri').value = t.priority; $('#tDue').value = t.due; $('#tNotes').value = t.notes;
+      $('#tCat').value = t.categoryId ?? ''; $('#tClient').value = t.clientId ?? '';
+      $('#tTypePer').checked = t.visibility === 'personal'; $('#tTypeBiz').checked = t.visibility !== 'personal';
+    } else if (taskMode === 'assign') {
+      const fp = $('#fPerson').value; if (fp && !fp.startsWith('team:') && [...$('#tWho').options].some(o => o.value === fp)) $('#tWho').value = fp;
       if ($('#fClient').value) $('#tClient').value = $('#fClient').value;
       if ($('#fCat').value) $('#tCat').value = $('#fCat').value;
     }
-    $('#taskDlgTitle').textContent = t ? 'Edit task' : 'Assign task'; $('#taskSave').textContent = t ? 'Save changes' : 'Assign task';
-    if ($('#tWho').options.length < 2) showErr('#taskError', 'Add people on the People tab first.');
+    $('#taskDlgTitle').textContent = t ? 'Edit task' : taskMode === 'own' ? 'Add my task' : 'Assign task';
+    $('#taskSave').textContent = t ? 'Save changes' : taskMode === 'own' ? 'Add task' : 'Assign task';
+    syncTaskType();
+    if (taskMode === 'assign' && $('#tWho').options.length < 2) showErr('#taskError', 'Add people on the People tab first.');
     $('#taskDlg').showModal(); $('#tTitle').focus();
   }
-  $('#newTaskBtn').onclick = () => openTask(null);
+  $('#newTaskBtn').onclick = () => openTask(null, 'assign');
+  $('#newOwnBtn').onclick = () => openTask(null, 'own');
   $('#taskForm').addEventListener('submit', async e => {
     e.preventDefault(); showErr('#taskError');
-    const body = { title: $('#tTitle').value.trim(), assigneeId: Number($('#tWho').value), priority: $('#tPri').value, due: $('#tDue').value, notes: $('#tNotes').value.trim(),
+    const own = taskMode === 'own'; const personal = own && $('#tTypePer').checked;
+    const body = { title: $('#tTitle').value.trim(), priority: $('#tPri').value, due: $('#tDue').value, notes: $('#tNotes').value.trim(),
       categoryId: $('#tCat').value ? Number($('#tCat').value) : null, clientId: $('#tClient').value ? Number($('#tClient').value) : null };
-    if (!body.assigneeId) return showErr('#taskError', 'Choose who this task is for.');
+    if (own) { body.visibility = personal ? 'personal' : 'business'; if (!personal) body.assigneeId = state.me.id; }
+    else body.assigneeId = Number($('#tWho').value);
+    if (!personal) body.partnerIds = checkedIds($('#tPartners'));
+    if (!own && !body.assigneeId) return showErr('#taskError', 'Choose who this task is for.');
+    if (own && !personal && state.me.role === 'manager' && !body.partnerIds.length) return showErr('#taskError', 'Choose at least one partner who can follow this task.');
     const b = $('#taskSave'); b.disabled = true;
     try {
       if (state.editing) { const { task } = await api('PATCH', '/api/tasks/' + state.editing.id, body); state.tasks = state.tasks.map(x => x.id === task.id ? task : x); toast('Task updated'); }
-      else { const { task } = await api('POST', '/api/tasks', body); state.tasks.unshift(task); toast('Assigned to ' + task.assigneeName); }
+      else {
+        const { task } = await api('POST', '/api/tasks', body); state.tasks.unshift(task);
+        toast(personal ? 'Added to your feed. Only you can see it.' : own ? 'Added to your feed' : 'Assigned to ' + task.assigneeName);
+      }
       $('#taskDlg').close(); render();
     } catch (err) { showErr('#taskError', err.message); }
     finally { b.disabled = false; }
@@ -289,7 +351,7 @@
   function renderClients() {
     const list = $('#clientList'); list.replaceChildren();
     const items = filteredClients();
-    if (!items.length) list.append(el('p', 'empty-state', state.clients.length ? 'No clients match.' : lead() ? 'No clients yet. Use “Add client” to create the first one.' : 'No clients have been assigned to you yet.'));
+    if (!items.length) list.append(el('p', 'empty-state', state.clients.length ? 'No clients match.' : mgmt() ? 'No clients yet. Use “Add client” to create the first one.' : 'No clients have been assigned to you yet.'));
     if (state.clientId && !state.clients.some(c => c.id === state.clientId)) state.clientId = null;
     if (!state.clientId && items.length && matchMedia('(min-width: 861px)').matches) state.clientId = items[0].id;
     for (const c of items) {
@@ -466,7 +528,7 @@
       const tr = el('tr', r.active ? '' : 'paused');
       const t = el('td'); t.append(el('b', null, r.title)); if (r.categoryName) t.append(el('small', null, r.categoryName)); tr.append(t);
       tr.append(el('td', null, r.clientName || '—'));
-      tr.append(el('td', null, r.assigneeName));
+      const who = el('td', null, r.assigneeName); const pn = r.partnerIds.map(id => userById(id)?.name).filter(Boolean); if (pn.length) who.append(el('small', null, 'Partners: ' + pn.join(', '))); tr.append(who);
       const s = el('td', null, schedule(r)); s.append(el('small', null, `Added to board ${r.leadDays} day${r.leadDays === 1 ? '' : 's'} before`)); tr.append(s);
       tr.append(el('td', null, r.active ? fmtDate(r.nextDue) || '—' : 'Paused'));
       const a = el('td', 'acts');
@@ -507,6 +569,7 @@
   function openRule(r) {
     editRule = r || null; $('#ruleForm').reset(); showErr('#ruleError');
     fillCats($('#rCat')); fillClients($('#rClient'), r?.clientId); fillPeople($('#rWho')); suggestPerson($('#rClient'), $('#rWho'));
+    fillPartnerChecks($('#rPartners'), r ? r.partnerIds : []);
     const mSel = $('#rMonth'); mSel.replaceChildren(); MONTHS.forEach((m, i) => opt(mSel, i + 1, m));
     const box = $('#rMonths'); box.replaceChildren();
     MONTHS.forEach((m, i) => { const l = el('label'); const c = el('input'); c.type = 'checkbox'; c.value = i + 1; c.id = 'rm-' + (i + 1); c.onchange = preview; l.append(c, document.createTextNode(m.slice(0, 3))); box.append(l); });
@@ -536,7 +599,7 @@
     e.preventDefault(); showErr('#ruleError');
     const body = { title: $('#rTitle').value.trim(), categoryId: $('#rCat').value ? Number($('#rCat').value) : null, clientId: $('#rClient').value ? Number($('#rClient').value) : null,
       assigneeId: Number($('#rWho').value), frequency: $('#rFreq').value, dueDay: Number($('#rDay').value), dueMonth: Number($('#rMonth').value),
-      months: [...document.querySelectorAll('#rMonths input:checked')].map(i => Number(i.value)), leadDays: Number($('#rLead').value), priority: $('#rPri').value, notes: $('#rNotes').value.trim() };
+      partnerIds: checkedIds($('#rPartners')), months: [...document.querySelectorAll('#rMonths input:checked')].map(i => Number(i.value)), leadDays: Number($('#rLead').value), priority: $('#rPri').value, notes: $('#rNotes').value.trim() };
     if (!body.assigneeId) return showErr('#ruleError', 'Choose who does this task.');
     const b = $('#ruleSave'); b.disabled = true;
     try {
@@ -586,9 +649,15 @@
     const host = $('#peopleList'); host.replaceChildren();
     if (state.me.role === 'manager') {
       const g = el('section', 'group'); const h = el('div', 'group-h'); h.append(el('h2', null, 'My staff')); g.append(h);
-      const staff = state.users.filter(u => u.role === 'staff');
+      const staff = state.users.filter(u => u.role === 'staff' && u.managerId === state.me.id);
       if (!staff.length) g.append(el('p', 'empty-group', 'No staff yet. Use “Add staff member” to create their login.'));
       const ul = el('ul', 'plist'); staff.forEach(s => ul.append(personRow(s))); g.append(ul); host.append(g); return;
+    }
+    const partners = state.users.filter(u => u.role === 'partner');
+    {
+      const g = el('section', 'group'); const gh = el('div', 'group-h'); gh.append(el('h2', null, 'Partners')); g.append(gh);
+      if (!partners.length) g.append(el('p', 'empty-group', 'No partners yet. Use “Add person” and choose Partner.'));
+      const ul = el('ul', 'plist'); partners.forEach(p => ul.append(personRow(p, 'Partner'))); g.append(ul); host.append(g);
     }
     const managers = state.users.filter(u => u.role === 'manager');
     if (!managers.length) { const g = el('section', 'group'); g.append(el('p', 'empty-group', 'No managers yet. Start by adding a manager, then add the staff who report to them.')); host.append(g); }
@@ -622,17 +691,17 @@
     const sel = $('#uMgr'); sel.replaceChildren(); for (const m of state.users.filter(x => x.role === 'manager' && x.active)) opt(sel, m.id, m.name);
     if (u) {
       $('#uName').value = u.name; $('#uTitle').value = u.title; $('#uLogin').value = u.username;
-      $('#personDlgTitle').textContent = 'Edit ' + (u.role === 'owner' ? 'my details' : u.role === 'manager' ? 'manager' : 'staff member');
+      $('#personDlgTitle').textContent = 'Edit ' + ({ owner: 'my details', partner: 'partner', manager: 'manager', staff: 'staff member' }[u.role]);
       $('#personSave').textContent = 'Save changes';
     } else { $('#uRole').value = owner && !sel.options.length ? 'manager' : 'staff'; syncRole(); $('#uPass').value = tempPassword(); }
     $('#personDlg').showModal(); $('#uName').focus();
   }
   function syncRole() {
     if (editPerson) return;
-    const staff = $('#uRole').value === 'staff';
-    $('#uMgrWrap').hidden = !staff || state.me.role !== 'owner';
-    $('#personDlgTitle').textContent = state.me.role === 'owner' ? (staff ? 'Add staff member' : 'Add manager') : 'Add staff member';
-    $('#personSave').textContent = staff ? 'Add staff member' : 'Add manager';
+    const role = state.me.role === 'owner' ? $('#uRole').value : 'staff';
+    $('#uMgrWrap').hidden = role !== 'staff' || state.me.role !== 'owner';
+    const t = { staff: 'Add staff member', manager: 'Add manager', partner: 'Add partner' }[role];
+    $('#personDlgTitle').textContent = t; $('#personSave').textContent = t;
   }
   $('#uRole').addEventListener('change', syncRole);
   $('#newPersonBtn').onclick = () => openPerson(null);
@@ -662,7 +731,7 @@
   let delUser = null, delNeedsTransfer = false;
   function openDelete(u) {
     delUser = u; showErr('#delError');
-    const open = state.tasks.filter(t => t.assigneeId === u.id && t.status !== 'done').length;
+    const open = state.tasks.filter(t => t.assigneeId === u.id && t.status !== 'done' && t.visibility !== 'personal').length;
     const rules = state.rules.filter(r => r.assigneeId === u.id).length;
     const cl = state.clients.filter(c => c.managerId === u.id || c.staffIds.includes(u.id)).length;
     const staffCount = state.users.filter(x => x.managerId === u.id).length;
@@ -674,12 +743,14 @@
     else if (delNeedsTransfer) $('#delInfo').textContent = `${u.name} has ${plural(open, 'open task')}, ${plural(rules, 'recurring task')} and ${plural(cl, 'client')}. Choose who takes these over.`;
     else $('#delInfo').textContent = `${u.name} has no open tasks or clients.`;
     const sel = $('#delTo'); sel.replaceChildren(); opt(sel, '', 'Choose a person');
-    const cands = state.users.filter(x => x.active && x.id !== u.id && x.role !== 'owner' && (u.role !== 'manager' || x.role === 'manager'));
+    const need = u.role === 'manager' || u.role === 'partner' ? u.role : null;
+    const cands = state.users.filter(x => x.active && x.id !== u.id && x.role !== 'owner' && (!need || x.role === need) &&
+      (state.me.role !== 'manager' || x.id === state.me.id || x.managerId === state.me.id));
     for (const x of cands) opt(sel, x.id, x.name + (x.role === 'manager' ? ' (manager)' : x.title ? ' · ' + x.title : ''));
     if (u.role === 'staff' && cands.some(x => x.id === u.managerId)) sel.value = String(u.managerId);
     $('#delToWrap').hidden = blocked || !delNeedsTransfer;
     $('#delSave').disabled = blocked;
-    if (!blocked && delNeedsTransfer && !cands.length) { showErr('#delError', 'There is no one to hand their work to. Add another ' + (u.role === 'manager' ? 'manager' : 'person') + ' first.'); $('#delSave').disabled = true; }
+    if (!blocked && delNeedsTransfer && !cands.length) { showErr('#delError', 'There is no one to hand their work to. Add another ' + (need || 'person') + ' first.'); $('#delSave').disabled = true; }
     $('#delDlg').showModal();
   }
   $('#delForm').addEventListener('submit', async e => {

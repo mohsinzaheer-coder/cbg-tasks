@@ -51,9 +51,10 @@
       <div class="brand"><img src="/logo-mark.png" alt="CBG" width="38" height="38"><div><b>Corporate Brilliance Global</b><span>Clients and Employee Tasks Management</span></div></div>
       <nav class="tabs" id="tabs">
         <button type="button" data-tab="tasks" class="on">Tasks</button>
+        <button type="button" data-tab="feed" data-role="assign">My feed</button>
         <button type="button" data-tab="clients">Clients</button>
-        <button type="button" data-tab="recurring" data-role="lead">Recurring</button>
-        <button type="button" data-tab="people" data-role="lead">People</button>
+        <button type="button" data-tab="recurring" data-role="assign">Recurring</button>
+        <button type="button" data-tab="people" data-role="mgmt">People</button>
       </nav>
       <div class="me">
         <div class="me-id"><b id="meName"></b><span id="meRole" class="role"></span></div>
@@ -80,10 +81,24 @@
         <label for="fPerson" id="fPersonWrap">Person<select id="fPerson"><option value="">Everyone I can see</option></select></label>
         <label for="fClient">Client<select id="fClient"><option value="">All clients</option></select></label>
         <label for="fCat">Category<select id="fCat"><option value="">All categories</option></select></label>
+        <label for="fPartner" id="fPartnerWrap">Partner<select id="fPartner"><option value="">Any partner</option></select></label>
         <label for="fPri">Priority<select id="fPri"><option value="">All</option><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option></select></label>
         <label for="fText">Search<input id="fText" type="search" placeholder="Task, notes, client or person"></label>
       </div>
       <div class="lanes" id="lanes"></div>
+    </section>
+
+    <!-- My feed -->
+    <section id="feedPage" class="stack-lg" hidden>
+      <div class="head">
+        <div><h1>My feed</h1><p class="sub">Your own to-do list. <b>Personal</b> tasks are private: nobody else can see them, not even the owner. <span id="feedSubBiz"></span></p></div>
+        <button class="primary" type="button" id="newOwnBtn">+ Add my task</button>
+      </div>
+      <div class="toolbar">
+        <label for="feedType">Show<select id="feedType"><option value="">Business and personal</option><option value="business">Business only</option><option value="personal">Personal only</option></select></label>
+        <label for="feedText">Search<input id="feedText" type="search" placeholder="Find in my feed"></label>
+      </div>
+      <div class="lanes" id="feedLanes"></div>
     </section>
 
     <!-- Clients -->
@@ -137,12 +152,17 @@
 <dialog id="taskDlg">
   <form id="taskForm" class="stack" method="dialog" autocomplete="off">
     <h2 id="taskDlgTitle">Assign task</h2>
+    <div class="seg" id="tTypeWrap" role="radiogroup" aria-label="Task type">
+      <label class="seg-opt"><input type="radio" name="tType" id="tTypeBiz" value="business" checked><span><b>Business</b><small>Work for the firm</small></span></label>
+      <label class="seg-opt"><input type="radio" name="tType" id="tTypePer" value="personal"><span><b>Personal</b><small>Only you can see it</small></span></label>
+    </div>
     <label for="tTitle">Task<input id="tTitle" required maxlength="160"></label>
     <div class="row2">
       <label for="tCat">Task category<select id="tCat"></select></label>
       <label for="tClient">Client<select id="tClient"></select></label>
     </div>
-    <label for="tWho">Assign to<select id="tWho" required></select></label>
+    <label for="tWho" id="tWhoWrap">Assign to<select id="tWho" required></select></label>
+    <div class="field" id="tPartnersWrap"><span class="flabel" id="tPartnersLabel">Partners involved</span><div class="checks" id="tPartners"></div><p class="help" id="tPartnersHelp">Partners you tick can follow this task.</p></div>
     <div class="row2">
       <label for="tPri">Priority<select id="tPri"><option value="high">High</option><option value="medium" selected>Medium</option><option value="low">Low</option></select></label>
       <label for="tDue">Due date<input id="tDue" type="date"></label>
@@ -219,6 +239,7 @@
       <label for="rClient">Client<select id="rClient"></select></label>
     </div>
     <label for="rWho">Assign to<select id="rWho" required></select></label>
+    <div class="field" id="rPartnersWrap"><span class="flabel">Partners involved</span><div class="checks" id="rPartners"></div></div>
     <div class="row3">
       <label for="rFreq">Repeats<select id="rFreq"><option value="monthly">Monthly</option><option value="quarterly">Quarterly</option><option value="annual">Yearly</option></select></label>
       <label for="rDay">Due on day<input id="rDay" type="number" min="1" max="31" value="15" required></label>
@@ -241,7 +262,7 @@
   <form id="personForm" class="stack" method="dialog" autocomplete="off">
     <h2 id="personDlgTitle">Add person</h2>
     <div class="row2" id="roleRow">
-      <label for="uRole">Role<select id="uRole"><option value="staff">Staff</option><option value="manager">Manager</option></select></label>
+      <label for="uRole">Role<select id="uRole"><option value="staff">Staff</option><option value="manager">Manager</option><option value="partner">Partner</option></select></label>
       <label for="uMgr" id="uMgrWrap">Reports to<select id="uMgr"></select></label>
     </div>
     <label for="uName">Full name<input id="uName" required maxlength="80"></label>
