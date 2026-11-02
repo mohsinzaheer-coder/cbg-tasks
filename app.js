@@ -161,7 +161,7 @@
     const sel = $('#fPerson'); const keep = sel.value;
     sel.replaceChildren(); opt(sel, '', 'Everyone I can see'); addPeopleOptions(sel, true);
     sel.value = [...sel.options].some(o => o.value === keep) ? keep : '';
-    fillSelect($('#fPartner'), 'Any partner', state.users.filter(u => u.role === 'partner').map(u => [u.id, u.name]));
+    fillSelect($('#fPartner'), 'Any partner', state.users.filter(u => u.role === 'partner' || u.role === 'owner').map(u => [u.id, u.name + (u.role === 'owner' ? ' (owner)' : '')]));
     fillSelect($('#fClient'), 'All clients', state.clients.filter(c => c.active).map(c => [c.id, c.name]));
     fillSelect($('#fCat'), 'All categories', state.categories.map(c => [c.id, c.name]));
     if (seesAll()) fillSelect($('#cMgr'), 'All partners', state.users.filter(u => u.role === 'partner').map(u => [u.id, u.name]));
@@ -267,9 +267,14 @@
   function fillCats(sel) { sel.replaceChildren(); opt(sel, '', 'No category'); for (const c of state.categories) opt(sel, c.id, c.name); }
   function fillPartnerChecks(box, selected) {
     box.replaceChildren();
-    const ps = state.users.filter(u => u.role === 'partner' && u.active && u.id !== state.me.id);
-    if (!ps.length) box.append(el('span', 'help', state.me.role === 'partner' ? 'No other partners yet.' : 'No partners added yet. The owner adds them on the People tab.'));
-    for (const p of ps) { const l = el('label'); const i = el('input'); i.type = 'checkbox'; i.value = p.id; i.id = box.id + '-' + p.id; i.checked = selected.includes(p.id); l.append(i, document.createTextNode(p.name)); box.append(l); }
+    // Everyone who can be named as a partner on a task: the owner and all active partners, including me
+    const ps = state.users.filter(u => (u.role === 'partner' || u.role === 'owner') && (u.active || selected.includes(u.id)))
+      .sort((x, y) => (x.role === 'owner') - (y.role === 'owner') || x.name.localeCompare(y.name));
+    if (!ps.some(u => u.role === 'partner')) box.append(el('span', 'help', 'No partners added yet. The owner adds them on the People tab.'));
+    for (const p of ps) {
+      const l = el('label'); const i = el('input'); i.type = 'checkbox'; i.value = p.id; i.id = box.id + '-' + p.id; i.checked = selected.includes(p.id);
+      l.append(i, document.createTextNode(p.name + (p.id === state.me.id ? ' (me)' : p.role === 'owner' ? ' (owner)' : ''))); box.append(l);
+    }
   }
   const checkedIds = box => [...box.querySelectorAll('input:checked')].map(i => Number(i.value));
   // When a client is chosen, pre-select a person who works on it

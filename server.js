@@ -355,7 +355,7 @@ function checkPartners(list, excludeId) {
   if (list == null) return [];
   if (!Array.isArray(list)) throw bad('Partners list is not valid.');
   const ids = [...new Set(list.map(Number))].filter(id => id !== excludeId);
-  for (const id of ids) if (!db.prepare("SELECT 1 FROM users WHERE id = ? AND role = 'partner' AND active = 1 AND deleted = 0").get(id)) throw bad('One of the chosen partners is not active.');
+  for (const id of ids) if (!db.prepare("SELECT 1 FROM users WHERE id = ? AND role IN ('partner','owner') AND active = 1 AND deleted = 0").get(id)) throw bad('One of the chosen partners is not active.');
   return ids;
 }
 function setTaskPartners(taskId, ids) {
@@ -815,7 +815,7 @@ function generateRecurring(onlyId) {
         const ins = db.prepare(`INSERT INTO tasks (title,notes,priority,due,assignee_id,created_by,created_at,updated_at,updated_by,category_id,client_id,recurring_id,period)
                     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(title, r.notes, r.priority, d.due, r.assignee_id, r.created_by, now, now, r.created_by, r.category_id, r.client_id, r.id, d.period);
         const pids = (r.partner_ids || '').split(',').filter(Boolean).map(Number)
-          .filter(id => db.prepare("SELECT 1 FROM users WHERE id = ? AND role = 'partner' AND active = 1 AND deleted = 0").get(id));
+          .filter(id => db.prepare("SELECT 1 FROM users WHERE id = ? AND role IN ('partner','owner') AND active = 1 AND deleted = 0").get(id));
         setTaskPartners(Number(ins.lastInsertRowid), pids);
         made++;
       }
