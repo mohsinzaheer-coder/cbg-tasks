@@ -139,6 +139,10 @@ CREATE TABLE IF NOT EXISTS recurring (
   add('period', "TEXT NOT NULL DEFAULT ''");
   db.exec('CREATE INDEX IF NOT EXISTS tasks_client ON tasks(client_id)');
 }
+{
+  const cols = db.prepare('PRAGMA table_info(users)').all().map(c => c.name);
+  if (!cols.includes('deleted')) db.exec('ALTER TABLE users ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0');
+}
 if (db.prepare('SELECT COUNT(*) n FROM categories').get().n === 0) {
   const ins = db.prepare('INSERT INTO categories (name) VALUES (?)');
   for (const c of ['Sales Tax', 'Withholding Tax', 'Income Tax', 'Annex H', 'Provincial Sales Tax', 'SECP / Corporate', 'Bookkeeping', 'Payroll', 'Audit', 'Other']) ins.run(c);
@@ -257,7 +261,7 @@ function teamIds(me) {
   return [me.id];
 }
 function canManageUser(me, target) {
-  if (!target) return false;
+  if (!target || target.deleted) return false;
   if (me.role === 'owner') return true;
   if (me.role === 'manager') return target.role === 'staff' && target.manager_id === me.id;
   return false;
@@ -366,8 +370,8 @@ route('POST', '/api/me/password', true, async (req, res, body, me) => {
 /* ---- people ---- */
 route('GET', '/api/users', true, async (req, res, body, me) => {
   let rows;
-  if (me.role === 'owner') rows = db.prepare('SELECT * FROM users ORDER BY role, name').all();
-  else if (me.role === 'manager') rows = db.prepare("SELECT * FROM users WHERE id = ? OR (manager_id = ? AND role = 'staff') ORDER BY name").all(me.id, me.id);
+  if (me.role === 'owner') rows = db.prepare('SELECT * FROM users WHERE deleted = 0 ORDER BY role, name').all();
+  else if (me.role === 'manager') rows = db.prepare("SELECT * FROM users WHERE deleted = 0 AND (id = ? OR (manager_id = ? AND role = 'staff')) ORDER BY name").all(me.id, me.id);
   else rows = [me];
   send(res, 200, { users: rows.map(publicUser) });
 });
@@ -395,6 +399,13 @@ route('PATCH', '/api/users/:id', true, async (req, res, body, me, params) => {
   const sets = {};
   if ('name' in body) { const n = str(body.name, 80, 'Name'); if (!n) throw bad('Enter a name.'); sets.name = n; }
   if ('title' in body) sets.title = str(body.title, 60, 'Job title');
+  if ('username' in body) {
+    const u = str(body.username, 40, 'Login ID');
+    if (!/^[A-Za-z0-9._-]{3,40}$/.test(u)) throw bad('Login ID must be 3–40 letters, numbers, dots, dashes or underscores.');
+    const ex = db.prepare('SELECT id FROM users WHERE username = ?').get(u);
+    if (ex && ex.id !== target.id) throw bad('That login ID is already taken.');
+    sets.username = u;
+  }
   if ('password' in body) { const p = passwordProblem(body.password); if (p) throw bad(p); sets.password_hash = hashPassword(body.password); sets.must_change = 1; }
   if ('active' in body) {
     if (target.id === me.id) throw bad('You cannot deactivate your own account.');
@@ -411,6 +422,41 @@ route('PATCH', '/api/users/:id', true, async (req, res, body, me, params) => {
   if (keys.length) db.prepare(`UPDATE users SET ${keys.map(k => k + ' = ?').join(', ')} WHERE id = ?`).run(...keys.map(k => sets[k]), target.id);
   if ('password' in body || sets.active === 0) db.prepare('DELETE FROM sessions WHERE user_id = ?').run(target.id);
   send(res, 200, { user: publicUser(db.prepare('SELECT * FROM users WHERE id = ?').get(target.id)) });
+});
+
+// Delete an employee. Open tasks, recurring tasks and clients pass to `transferTo`.
+// The record is kept (hidden) so completed tasks and the password access log keep their names.
+route('DELETE', '/api/users/:id', true, async (req, res, body, me, params) => {
+  const target = db.prepare('SELECT * FROM users WHERE id = ?').get(Number(params.id));
+  if (!canManageUser(me, target) || target.id === me.id) throw new HttpError(404, 'Person not found.');
+  if (target.role === 'owner') throw bad('The owner account cannot be deleted.');
+  if (target.role === 'manager' && db.prepare('SELECT 1 FROM users WHERE manager_id = ? AND deleted = 0').get(target.id))
+    throw bad('Move this manager\'s staff to another manager first.');
+  const n = sql => db.prepare(sql).get(target.id).n;
+  const openTasks = n("SELECT COUNT(*) n FROM tasks WHERE assignee_id = ? AND status <> 'done'");
+  const rules = n('SELECT COUNT(*) n FROM recurring WHERE assignee_id = ?');
+  const managed = n('SELECT COUNT(*) n FROM clients WHERE manager_id = ?');
+  const assigned = n('SELECT COUNT(*) n FROM client_staff WHERE user_id = ?');
+  let to = null;
+  if (openTasks || rules || managed || assigned) {
+    to = db.prepare('SELECT * FROM users WHERE id = ? AND active = 1 AND deleted = 0').get(Number(body.transferTo));
+    if (!to || to.id === target.id || to.role === 'owner') throw bad('Choose who takes over their open work and clients.');
+    const team = teamIds(me);
+    if (team && !team.includes(to.id)) throw bad('Choose someone in your own team.');
+    if (target.role === 'manager' && to.role !== 'manager') throw bad('Choose another manager to take over.');
+  }
+  tx(() => {
+    if (to) {
+      db.prepare("UPDATE tasks SET assignee_id = ?, updated_at = ?, updated_by = ? WHERE assignee_id = ? AND status <> 'done'").run(to.id, Date.now(), me.id, target.id);
+      db.prepare('UPDATE recurring SET assignee_id = ? WHERE assignee_id = ?').run(to.id, target.id);
+      if (managed) db.prepare('UPDATE clients SET manager_id = ?, updated_at = ? WHERE manager_id = ?').run(to.id, Date.now(), target.id);
+      if (to.role === 'staff') db.prepare('INSERT OR IGNORE INTO client_staff (client_id, user_id) SELECT client_id, ? FROM client_staff WHERE user_id = ?').run(to.id, target.id);
+    }
+    db.prepare('DELETE FROM client_staff WHERE user_id = ?').run(target.id);
+    db.prepare('DELETE FROM sessions WHERE user_id = ?').run(target.id);
+    db.prepare('UPDATE users SET deleted = 1, active = 0, username = ? WHERE id = ?').run(`deleted-${target.id}-${target.username}`.slice(0, 60), target.id);
+  });
+  send(res, 200, { ok: true, moved: { openTasks, rules, clients: managed + assigned }, to: to ? to.name : null });
 });
 
 /* ---- categories ---- */

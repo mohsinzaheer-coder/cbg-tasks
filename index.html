@@ -248,11 +248,23 @@
     <label for="uTitle">Job title<input id="uTitle" maxlength="60" placeholder="e.g. Tax Associate"></label>
     <div class="row2">
       <label for="uLogin">Login ID<input id="uLogin" required maxlength="40" pattern="[A-Za-z0-9._\-]{3,40}" placeholder="e.g. ahmed.k"></label>
-      <label for="uPass">Temporary password<input id="uPass" required minlength="8" maxlength="128"></label>
+      <label for="uPass" id="uPassWrap">Temporary password<input id="uPass" required minlength="8" maxlength="128"></label>
     </div>
-    <p class="help">They'll be asked to choose their own password at first sign-in.</p>
+    <p class="help" id="personHelp">They'll be asked to choose their own password at first sign-in.</p>
     <p class="form-error" id="personError" role="alert" hidden></p>
     <div class="dlg-actions"><button type="button" class="ghost" data-close>Cancel</button><button class="primary" type="submit" id="personSave">Add person</button></div>
+  </form>
+</dialog>
+
+<!-- Delete employee -->
+<dialog id="delDlg">
+  <form id="delForm" class="stack" method="dialog" autocomplete="off">
+    <h2 id="delTitle">Delete employee</h2>
+    <p id="delInfo"></p>
+    <label for="delTo" id="delToWrap">Hand over their work to<select id="delTo"></select></label>
+    <p class="help">Their login stops working straight away and the login ID can be reused. Completed tasks stay in the records under their name. To stop someone signing in for a while, use Deactivate instead.</p>
+    <p class="form-error" id="delError" role="alert" hidden></p>
+    <div class="dlg-actions"><button type="button" class="ghost" data-close>Cancel</button><button class="primary danger-btn" type="submit" id="delSave">Delete employee</button></div>
   </form>
 </dialog>
 

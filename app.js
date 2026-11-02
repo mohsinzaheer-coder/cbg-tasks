@@ -562,7 +562,10 @@
     if (!u.active) li.append(el('span', 'tag off', 'Deactivated')); else if (tag) li.append(el('span', 'tag', tag));
     const c = openCount(u.id); const nCl = state.clients.filter(x => x.active && (x.staffIds.includes(u.id) || x.managerId === u.id)).length;
     li.append(el('span', 'load', `${c.open} open${c.late ? ` · ${c.late} overdue` : ''} · ${nCl} client${nCl === 1 ? '' : 's'}`));
-    if (u.id === state.me.id) return li;
+    if (u.id === state.me.id) {
+      if (state.me.role === 'owner') { const m = el('div', 'mini'); m.append(btn('Edit', 'ghost', () => openPerson(u))); li.append(m); }
+      return li;
+    }
     const mini = el('div', 'mini'); const key = 'user:' + u.id;
     if (state.confirm === key) {
       mini.append(el('span', null, u.active ? 'Deactivate? They won\'t be able to sign in.' : 'Reactivate this account?'), btn(u.active ? 'Deactivate' : 'Reactivate', 'ghost danger', () => setActive(u, !u.active)), btn('Cancel', 'ghost', () => { state.confirm = null; renderPeople(); }));
@@ -572,7 +575,9 @@
       const mgrs = state.users.filter(x => x.role === 'manager' && x.active);
       if (mgrs.length > 1) { const s = el('select'); s.id = 'move-' + u.id; s.setAttribute('aria-label', 'Move ' + u.name + ' to another manager'); for (const m of mgrs) opt(s, m.id, 'Reports to ' + m.name); s.value = String(u.managerId); s.onchange = () => moveStaff(u, Number(s.value)); mini.append(s); }
     }
-    mini.append(btn('Reset password', 'ghost', () => openReset(u)), btn(u.active ? 'Deactivate' : 'Reactivate', 'ghost' + (u.active ? ' danger' : ''), () => { state.confirm = key; renderPeople(); }));
+    mini.append(btn('Edit', 'ghost', () => openPerson(u)), btn('Reset password', 'ghost', () => openReset(u)),
+      btn(u.active ? 'Deactivate' : 'Reactivate', 'ghost', () => { state.confirm = key; renderPeople(); }),
+      btn('Delete', 'ghost danger', () => openDelete(u)));
     li.append(mini); return li;
   }
   function renderPeople() {
@@ -606,23 +611,43 @@
     catch (err) { toast(err.message); }
     render();
   }
-  function openPerson() {
+  let editPerson = null;
+  function openPerson(u) {
+    editPerson = u || null;
     $('#personForm').reset(); showErr('#personError');
-    const owner = state.me.role === 'owner'; $('#roleRow').hidden = !owner;
-    const sel = $('#uMgr'); sel.replaceChildren(); for (const m of state.users.filter(u => u.role === 'manager' && u.active)) opt(sel, m.id, m.name);
-    $('#uRole').value = owner && !sel.options.length ? 'manager' : 'staff'; syncRole();
-    $('#uPass').value = tempPassword(); $('#personDlg').showModal(); $('#uName').focus();
+    const owner = state.me.role === 'owner'; $('#roleRow').hidden = !owner || !!u;
+    $('#uPassWrap').hidden = !!u; $('#uPass').required = !u; $('#personHelp').hidden = !!u;
+    const sel = $('#uMgr'); sel.replaceChildren(); for (const m of state.users.filter(x => x.role === 'manager' && x.active)) opt(sel, m.id, m.name);
+    if (u) {
+      $('#uName').value = u.name; $('#uTitle').value = u.title; $('#uLogin').value = u.username;
+      $('#personDlgTitle').textContent = 'Edit ' + (u.role === 'owner' ? 'my details' : u.role === 'manager' ? 'manager' : 'staff member');
+      $('#personSave').textContent = 'Save changes';
+    } else { $('#uRole').value = owner && !sel.options.length ? 'manager' : 'staff'; syncRole(); $('#uPass').value = tempPassword(); }
+    $('#personDlg').showModal(); $('#uName').focus();
   }
   function syncRole() {
+    if (editPerson) return;
     const staff = $('#uRole').value === 'staff';
     $('#uMgrWrap').hidden = !staff || state.me.role !== 'owner';
     $('#personDlgTitle').textContent = state.me.role === 'owner' ? (staff ? 'Add staff member' : 'Add manager') : 'Add staff member';
     $('#personSave').textContent = staff ? 'Add staff member' : 'Add manager';
   }
   $('#uRole').addEventListener('change', syncRole);
-  $('#newPersonBtn').onclick = openPerson;
+  $('#newPersonBtn').onclick = () => openPerson(null);
   $('#personForm').addEventListener('submit', async e => {
     e.preventDefault(); showErr('#personError');
+    if (editPerson) {
+      const b = $('#personSave'); b.disabled = true;
+      try {
+        const { user } = await api('PATCH', '/api/users/' + editPerson.id, { name: $('#uName').value.trim(), title: $('#uTitle').value.trim(), username: $('#uLogin').value.trim() });
+        state.users = state.users.map(x => x.id === user.id ? user : x);
+        if (user.id === state.me.id) { Object.assign(state.me, user); $('#meName').textContent = user.name; }
+        $('#personDlg').close(); await refresh();
+        toast(user.username !== editPerson.username ? `Saved. New login ID: ${user.username}` : 'Details saved');
+      } catch (err) { showErr('#personError', err.message); }
+      finally { b.disabled = false; }
+      return;
+    }
     const role = state.me.role === 'owner' ? $('#uRole').value : 'staff';
     if (role === 'staff' && state.me.role === 'owner' && !$('#uMgr').value) return showErr('#personError', 'Add a manager first, then add staff under them.');
     const body = { role, managerId: Number($('#uMgr').value) || undefined, name: $('#uName').value.trim(), title: $('#uTitle').value.trim(), username: $('#uLogin').value.trim(), password: $('#uPass').value };
@@ -631,6 +656,43 @@
     catch (err) { showErr('#personError', err.message); }
     finally { b.disabled = false; }
   });
+  /* delete employee */
+  let delUser = null, delNeedsTransfer = false;
+  function openDelete(u) {
+    delUser = u; showErr('#delError');
+    const open = state.tasks.filter(t => t.assigneeId === u.id && t.status !== 'done').length;
+    const rules = state.rules.filter(r => r.assigneeId === u.id).length;
+    const cl = state.clients.filter(c => c.managerId === u.id || c.staffIds.includes(u.id)).length;
+    const staffCount = state.users.filter(x => x.managerId === u.id).length;
+    const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
+    $('#delTitle').textContent = 'Delete ' + u.name;
+    delNeedsTransfer = !!(open || rules || cl);
+    const blocked = u.role === 'manager' && staffCount > 0;
+    if (blocked) $('#delInfo').textContent = `${u.name} still has ${plural(staffCount, 'staff member')}. Move them to another manager (People tab) before deleting.`;
+    else if (delNeedsTransfer) $('#delInfo').textContent = `${u.name} has ${plural(open, 'open task')}, ${plural(rules, 'recurring task')} and ${plural(cl, 'client')}. Choose who takes these over.`;
+    else $('#delInfo').textContent = `${u.name} has no open tasks or clients.`;
+    const sel = $('#delTo'); sel.replaceChildren(); opt(sel, '', 'Choose a person');
+    const cands = state.users.filter(x => x.active && x.id !== u.id && x.role !== 'owner' && (u.role !== 'manager' || x.role === 'manager'));
+    for (const x of cands) opt(sel, x.id, x.name + (x.role === 'manager' ? ' (manager)' : x.title ? ' · ' + x.title : ''));
+    if (u.role === 'staff' && cands.some(x => x.id === u.managerId)) sel.value = String(u.managerId);
+    $('#delToWrap').hidden = blocked || !delNeedsTransfer;
+    $('#delSave').disabled = blocked;
+    if (!blocked && delNeedsTransfer && !cands.length) { showErr('#delError', 'There is no one to hand their work to. Add another ' + (u.role === 'manager' ? 'manager' : 'person') + ' first.'); $('#delSave').disabled = true; }
+    $('#delDlg').showModal();
+  }
+  $('#delForm').addEventListener('submit', async e => {
+    e.preventDefault(); showErr('#delError');
+    const body = {};
+    if (delNeedsTransfer) { body.transferTo = Number($('#delTo').value); if (!body.transferTo) return showErr('#delError', 'Choose who takes over their work.'); }
+    const b = $('#delSave'); b.disabled = true;
+    try {
+      const r = await api('DELETE', '/api/users/' + delUser.id, body);
+      $('#delDlg').close(); await refresh();
+      toast(r.to ? `${delUser.name} deleted. Work handed to ${r.to}.` : `${delUser.name} deleted.`);
+    } catch (err) { showErr('#delError', err.message); }
+    finally { b.disabled = false; }
+  });
+
   let resetUser = null;
   function openReset(u) { resetUser = u; showErr('#resetError'); $('#resetFor').textContent = `${u.name} (login ID: ${u.username})`; $('#rPass').value = tempPassword(); $('#resetDlg').showModal(); $('#rPass').select(); }
   $('#resetForm').addEventListener('submit', async e => {

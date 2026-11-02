@@ -214,3 +214,4 @@ dialog{max-height:calc(100vh - 32px);overflow:auto}
 .inline-form input{flex:1 1 200px;width:auto}
 .presets{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
 .presets button{font-size:.82rem;padding:5px 10px;border-radius:99px}
+button.primary.danger-btn{background:var(--late);border-color:var(--late);color:#fff}
