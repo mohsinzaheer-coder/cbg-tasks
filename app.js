@@ -666,6 +666,7 @@
       teamGroup(null, state.users.filter(u => u.role === 'staff' && u.managerId === state.me.id), 'No staff yet. Use “Add staff member” to create their login.', 'My staff');
       return;
     }
+    teamGroup(null, state.users.filter(u => u.role === 'owner'), '', 'Owner');
     const partners = state.users.filter(u => u.role === 'partner');
     if (!partners.length) { const g = el('section', 'group'); g.append(el('p', 'empty-group', 'No partners yet. Use “Add person” to add a partner, then add the staff who report to them.')); host.append(g); }
     for (const p of partners) teamGroup(p, state.users.filter(u => u.role === 'staff' && u.managerId === p.id), 'No staff report to ' + p.name + ' yet.');
