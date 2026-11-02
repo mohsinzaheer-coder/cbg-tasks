@@ -1,7 +1,7 @@
 FROM node:22-alpine
 WORKDIR /app
 COPY package.json server.js ./
-COPY public ./public
+COPY index.html app.js styles.css logo.svg ./public/
 ENV NODE_ENV=production PORT=3000 DB_PATH=/data/cbg.db
 VOLUME ["/data"]
 EXPOSE 3000

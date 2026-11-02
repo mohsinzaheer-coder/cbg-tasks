@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Corporate Brilliance Global · Tasks</title>
+<link rel="icon" href="/logo.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Sora:wght@500;600;700&family=Source+Sans+3:wght@400;500;600;700&display=swap">
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+
+<!-- Sign in -->
+<main id="loginView" class="auth" hidden>
+  <div class="auth-card">
+    <div class="brand brand-lg"><img src="/logo.svg" alt="" width="44" height="44"><div><b>Corporate Brilliance Global</b><span>Employee Task Management</span></div></div>
+    <form id="loginForm" class="stack" autocomplete="on">
+      <h1>Sign in</h1>
+      <label for="lUser">Login ID<input id="lUser" name="username" autocomplete="username" required autofocus></label>
+      <label for="lPass">Password<input id="lPass" name="password" type="password" autocomplete="current-password" required></label>
+      <p class="form-error" id="loginError" role="alert" hidden></p>
+      <button class="primary wide" type="submit">Sign in</button>
+      <p class="help">Forgot your password? Ask your manager to reset it.</p>
+    </form>
+  </div>
+</main>
+
+<!-- Forced / voluntary password change -->
+<main id="pwView" class="auth" hidden>
+  <div class="auth-card">
+    <div class="brand brand-lg"><img src="/logo.svg" alt="" width="44" height="44"><div><b>Corporate Brilliance Global</b><span>Employee Task Management</span></div></div>
+    <form id="pwForm" class="stack" autocomplete="off">
+      <h1 id="pwTitle">Choose your password</h1>
+      <p class="help" id="pwHelp">You signed in with a temporary password. Set your own before continuing.</p>
+      <label for="pCur">Current password<input id="pCur" type="password" autocomplete="current-password" required></label>
+      <label for="pNew">New password<input id="pNew" type="password" autocomplete="new-password" required minlength="8"></label>
+      <label for="pNew2">Repeat new password<input id="pNew2" type="password" autocomplete="new-password" required minlength="8"></label>
+      <p class="help">At least 8 characters, with a letter and a number.</p>
+      <p class="form-error" id="pwError" role="alert" hidden></p>
+      <button class="primary wide" type="submit">Save password</button>
+      <button class="link" type="button" id="pwCancel" hidden>Cancel</button>
+    </form>
+  </div>
+</main>
+
+<!-- App -->
+<div id="appView" hidden>
+  <header class="bar">
+    <div class="bar-in">
+      <div class="brand"><img src="/logo.svg" alt="" width="32" height="32"><div><b>Corporate Brilliance Global</b><span>Task Management</span></div></div>
+      <nav class="tabs" id="tabs">
+        <button type="button" data-tab="tasks" class="on">Tasks</button>
+        <button type="button" data-tab="people" id="peopleTab">People</button>
+      </nav>
+      <div class="me">
+        <div class="me-id"><b id="meName"></b><span id="meRole" class="role"></span></div>
+        <button type="button" class="ghost" id="changePw">Change password</button>
+        <button type="button" class="ghost" id="logout">Sign out</button>
+      </div>
+    </div>
+  </header>
+
+  <div class="page">
+    <section id="tasksPage" class="stack-lg">
+      <div class="head">
+        <div>
+          <h1 id="tasksTitle">Tasks</h1>
+          <p class="sub" id="tasksSub"></p>
+        </div>
+        <button class="primary" type="button" id="newTaskBtn" hidden>+ Assign task</button>
+      </div>
+
+      <div class="stats">
+        <div class="stat"><b id="sOpen">0</b><span>Open</span></div>
+        <div class="stat"><b id="sDoing">0</b><span>In progress</span></div>
+        <div class="stat warn"><b id="sLate">0</b><span>Overdue</span></div>
+        <div class="stat good"><b id="sDone">0</b><span>Done</span></div>
+      </div>
+
+      <div class="toolbar" id="toolbar">
+        <label for="fPerson" id="fPersonWrap">Person<select id="fPerson"><option value="">Everyone I can see</option></select></label>
+        <label for="fPri">Priority<select id="fPri"><option value="">All</option><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option></select></label>
+        <label for="fText">Search<input id="fText" type="search" placeholder="Task, notes or person"></label>
+      </div>
+
+      <div class="lanes" id="lanes"></div>
+    </section>
+
+    <section id="peoplePage" class="stack-lg" hidden>
+      <div class="head">
+        <div>
+          <h1>People</h1>
+          <p class="sub" id="peopleSub"></p>
+        </div>
+        <button class="primary" type="button" id="newPersonBtn">+ Add person</button>
+      </div>
+      <div id="peopleList" class="stack-lg"></div>
+    </section>
+  </div>
+</div>
+
+<!-- Task dialog -->
+<dialog id="taskDlg">
+  <form id="taskForm" class="stack" method="dialog" autocomplete="off">
+    <h2 id="taskDlgTitle">Assign task</h2>
+    <label for="tTitle">Task<input id="tTitle" required maxlength="160"></label>
+    <label for="tWho">Assign to<select id="tWho" required></select></label>
+    <div class="row2">
+      <label for="tPri">Priority<select id="tPri"><option value="high">High</option><option value="medium" selected>Medium</option><option value="low">Low</option></select></label>
+      <label for="tDue">Due date<input id="tDue" type="date"></label>
+    </div>
+    <label for="tNotes">Instructions<textarea id="tNotes" maxlength="2000" rows="4"></textarea></label>
+    <p class="form-error" id="taskError" role="alert" hidden></p>
+    <div class="dlg-actions"><button type="button" class="ghost" data-close>Cancel</button><button class="primary" type="submit" id="taskSave">Assign task</button></div>
+  </form>
+</dialog>
+
+<!-- Progress note dialog -->
+<dialog id="noteDlg">
+  <form id="noteForm" class="stack" method="dialog" autocomplete="off">
+    <h2>Progress note</h2>
+    <p class="help" id="noteFor"></p>
+    <label for="nText">What's the latest?<textarea id="nText" maxlength="1000" rows="4"></textarea></label>
+    <p class="form-error" id="noteError" role="alert" hidden></p>
+    <div class="dlg-actions"><button type="button" class="ghost" data-close>Cancel</button><button class="primary" type="submit">Save note</button></div>
+  </form>
+</dialog>
+
+<!-- Person dialog -->
+<dialog id="personDlg">
+  <form id="personForm" class="stack" method="dialog" autocomplete="off">
+    <h2 id="personDlgTitle">Add person</h2>
+    <div class="row2" id="roleRow">
+      <label for="uRole">Role<select id="uRole"><option value="staff">Staff</option><option value="manager">Manager</option></select></label>
+      <label for="uMgr" id="uMgrWrap">Reports to<select id="uMgr"></select></label>
+    </div>
+    <label for="uName">Full name<input id="uName" required maxlength="80"></label>
+    <label for="uTitle">Job title<input id="uTitle" maxlength="60" placeholder="e.g. Accounts Officer"></label>
+    <div class="row2" id="credRow">
+      <label for="uLogin">Login ID<input id="uLogin" required maxlength="40" pattern="[A-Za-z0-9._\-]{3,40}" placeholder="e.g. ahmed.k"></label>
+      <label for="uPass">Temporary password<input id="uPass" required minlength="8" maxlength="128"></label>
+    </div>
+    <p class="help" id="personHelp">They'll be asked to choose their own password at first sign-in.</p>
+    <p class="form-error" id="personError" role="alert" hidden></p>
+    <div class="dlg-actions"><button type="button" class="ghost" data-close>Cancel</button><button class="primary" type="submit" id="personSave">Add person</button></div>
+  </form>
+</dialog>
+
+<!-- Reset password dialog -->
+<dialog id="resetDlg">
+  <form id="resetForm" class="stack" method="dialog" autocomplete="off">
+    <h2>Reset password</h2>
+    <p class="help" id="resetFor"></p>
+    <label for="rPass">New temporary password<input id="rPass" required minlength="8" maxlength="128"></label>
+    <p class="help">Share it with them privately. They'll choose their own at next sign-in, and any devices they're signed in on will be signed out.</p>
+    <p class="form-error" id="resetError" role="alert" hidden></p>
+    <div class="dlg-actions"><button type="button" class="ghost" data-close>Cancel</button><button class="primary" type="submit">Reset password</button></div>
+  </form>
+</dialog>
+
+<div class="toast" id="toast" role="status" hidden></div>
+<script src="/app.js"></script>
+</body>
+</html>
