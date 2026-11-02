@@ -1,12 +1,12 @@
-# Corporate Brilliance Global — Employee Task Management
+# Corporate Brilliance Global — Clients and Employee Tasks Management
 
 A web portal where every employee signs in with their own **Login ID and password**.
 
 | Role | Sees | Can do |
 |---|---|---|
 | **Owner** | Every manager, every staff member, every task | Add managers and staff, move staff between managers, assign tasks to anyone, reset passwords, deactivate accounts |
-| **Manager** | Himself and only the staff who report to him | Add staff to his own team, assign tasks to them, edit or delete those tasks, reset their passwords |
-| **Staff** | Only tasks assigned to him | Mark tasks Started or Done and add a progress note. Cannot create, edit, reassign or delete tasks |
+| **Manager** | Himself, the staff who report to him, and the clients assigned to him or his staff | Add staff to his own team, assign tasks to them, edit or delete those tasks, reset their passwords |
+| **Staff** | Only tasks assigned to him, and the clients assigned to him | Mark tasks Started or Done, add a progress note, view the portal logins of his clients. Cannot create, edit, reassign or delete tasks or clients |
 
 Every rule is checked on the server, so a staff member cannot see another person's tasks even by tampering with the browser.
 
@@ -66,6 +66,19 @@ Run it as a service (systemd or pm2) and put Nginx or Caddy in front for HTTPS. 
 
 ---
 
+## Client portal passwords (CRED_KEY)
+
+Client logins for FBR, PRA, SRB, KPRA, BRA and SECP are stored **encrypted**. The encryption key comes from the `CRED_KEY` setting.
+
+- Set `CRED_KEY` to a long random phrase (at least 30 characters), for example four or five unrelated words plus numbers.
+- **Write it down and keep it somewhere safe outside the app.** If it is lost or changed, saved portal passwords can't be opened again; they would have to be re-entered.
+- Without `CRED_KEY`, the app works normally but won't save portal passwords (login IDs still save).
+- Each time someone shows a password, the app records who and when. Owners and the client's manager can see this under **Password access log**.
+
+## Recurring tasks
+
+Set up returns once (monthly, quarterly or yearly) and the app adds each one to the task board a chosen number of days before it's due, titled with the client and the period, e.g. *Sales Tax Return — ABC Ltd — Oct 2026*. The quick-start buttons fill typical due days; change the day whenever a deadline is extended or moved by notification.
+
 ## Settings
 
 | Variable | Default | Purpose |
@@ -74,12 +87,14 @@ Run it as a service (systemd or pm2) and put Nginx or Caddy in front for HTTPS. 
 | `DB_PATH` | `./data/cbg.db` | Where the database file is kept |
 | `OWNER_USERNAME` / `OWNER_PASSWORD` / `OWNER_NAME` | — | First owner account (used once, on an empty database) |
 | `COOKIE_SECURE` | off | Set to `1` when the site runs on HTTPS |
+| `CRED_KEY` | — | Encryption key for client portal passwords. Keep a safe copy |
+| `TZ_NAME` | `Asia/Karachi` | Time zone used for due dates |
 
 ## Backups
 Everything is in the database file (`DB_PATH`). Copy that file, together with the `-wal` file next to it if one exists, to a safe place regularly.
 
 ## Branding
-Replace `public/logo.svg` with your company logo. Colours are at the top of `public/styles.css`.
+The CBG logo is in `logo-mark.png` (round mark) and `logo-full.png` (sign-in page). Colours are at the top of `public/styles.css`.
 
 ## Using it day to day
 1. **Owner:** go to **People → Add person** and add each manager first, then add staff and choose who they report to. Each person gets a login ID and a temporary password. Share these privately.

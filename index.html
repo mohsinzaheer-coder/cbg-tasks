@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Corporate Brilliance Global · Tasks</title>
-<link rel="icon" href="/logo.svg" type="image/svg+xml">
+<title>CBG · Clients and Employee Tasks Management</title>
+<link rel="icon" href="/logo-mark.png" type="image/png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Sora:wght@500;600;700&family=Source+Sans+3:wght@400;500;600;700&display=swap">
 <link rel="stylesheet" href="/styles.css">
@@ -14,7 +14,7 @@
 <!-- Sign in -->
 <main id="loginView" class="auth" hidden>
   <div class="auth-card">
-    <div class="brand brand-lg"><img src="/logo.svg" alt="" width="44" height="44"><div><b>Corporate Brilliance Global</b><span>Employee Task Management</span></div></div>
+    <div class="auth-brand"><img src="/logo-full.png" alt="CBG — Envision, Execute, Elevate" width="150" height="143"><div><b>Corporate Brilliance Global</b><span>Clients and Employee Tasks Management</span></div></div>
     <form id="loginForm" class="stack" autocomplete="on">
       <h1>Sign in</h1>
       <label for="lUser">Login ID<input id="lUser" name="username" autocomplete="username" required autofocus></label>
@@ -26,10 +26,10 @@
   </div>
 </main>
 
-<!-- Forced / voluntary password change -->
+<!-- Password change -->
 <main id="pwView" class="auth" hidden>
   <div class="auth-card">
-    <div class="brand brand-lg"><img src="/logo.svg" alt="" width="44" height="44"><div><b>Corporate Brilliance Global</b><span>Employee Task Management</span></div></div>
+    <div class="auth-brand"><img src="/logo-full.png" alt="CBG — Envision, Execute, Elevate" width="150" height="143"><div><b>Corporate Brilliance Global</b><span>Clients and Employee Tasks Management</span></div></div>
     <form id="pwForm" class="stack" autocomplete="off">
       <h1 id="pwTitle">Choose your password</h1>
       <p class="help" id="pwHelp">You signed in with a temporary password. Set your own before continuing.</p>
@@ -48,10 +48,12 @@
 <div id="appView" hidden>
   <header class="bar">
     <div class="bar-in">
-      <div class="brand"><img src="/logo.svg" alt="" width="32" height="32"><div><b>Corporate Brilliance Global</b><span>Task Management</span></div></div>
+      <div class="brand"><img src="/logo-mark.png" alt="CBG" width="38" height="38"><div><b>Corporate Brilliance Global</b><span>Clients and Employee Tasks Management</span></div></div>
       <nav class="tabs" id="tabs">
         <button type="button" data-tab="tasks" class="on">Tasks</button>
-        <button type="button" data-tab="people" id="peopleTab">People</button>
+        <button type="button" data-tab="clients">Clients</button>
+        <button type="button" data-tab="recurring" data-role="lead">Recurring</button>
+        <button type="button" data-tab="people" data-role="lead">People</button>
       </nav>
       <div class="me">
         <div class="me-id"><b id="meName"></b><span id="meRole" class="role"></span></div>
@@ -62,37 +64,68 @@
   </header>
 
   <div class="page">
+    <!-- Tasks -->
     <section id="tasksPage" class="stack-lg">
       <div class="head">
-        <div>
-          <h1 id="tasksTitle">Tasks</h1>
-          <p class="sub" id="tasksSub"></p>
-        </div>
+        <div><h1 id="tasksTitle">Tasks</h1><p class="sub" id="tasksSub"></p></div>
         <button class="primary" type="button" id="newTaskBtn" hidden>+ Assign task</button>
       </div>
-
       <div class="stats">
         <div class="stat"><b id="sOpen">0</b><span>Open</span></div>
         <div class="stat"><b id="sDoing">0</b><span>In progress</span></div>
         <div class="stat warn"><b id="sLate">0</b><span>Overdue</span></div>
         <div class="stat good"><b id="sDone">0</b><span>Done</span></div>
       </div>
-
-      <div class="toolbar" id="toolbar">
+      <div class="toolbar">
         <label for="fPerson" id="fPersonWrap">Person<select id="fPerson"><option value="">Everyone I can see</option></select></label>
+        <label for="fClient">Client<select id="fClient"><option value="">All clients</option></select></label>
+        <label for="fCat">Category<select id="fCat"><option value="">All categories</option></select></label>
         <label for="fPri">Priority<select id="fPri"><option value="">All</option><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option></select></label>
-        <label for="fText">Search<input id="fText" type="search" placeholder="Task, notes or person"></label>
+        <label for="fText">Search<input id="fText" type="search" placeholder="Task, notes, client or person"></label>
       </div>
-
       <div class="lanes" id="lanes"></div>
     </section>
 
+    <!-- Clients -->
+    <section id="clientsPage" class="stack-lg" hidden>
+      <div class="head">
+        <div><h1>Clients</h1><p class="sub" id="clientsSub"></p></div>
+        <button class="primary" type="button" id="newClientBtn" hidden>+ Add client</button>
+      </div>
+      <div class="note warn" id="credsOff" hidden>Saving portal passwords is switched off. Ask the administrator to add a <b>CRED_KEY</b> setting on the server (see the guide).</div>
+      <div class="toolbar">
+        <label for="cSearch">Search<input id="cSearch" type="search" placeholder="Name, code, NTN or STRN"></label>
+        <label for="cMgr" id="cMgrWrap">Manager<select id="cMgr"><option value="">All managers</option></select></label>
+        <label for="cShow">Show<select id="cShow"><option value="active">Active clients</option><option value="all">Including archived</option></select></label>
+      </div>
+      <div class="client-layout">
+        <div class="client-list" id="clientList" role="list"></div>
+        <article class="client-detail" id="clientDetail"><p class="empty-state">Select a client to see their details and portal logins.</p></article>
+      </div>
+    </section>
+
+    <!-- Recurring -->
+    <section id="recurringPage" class="stack-lg" hidden>
+      <div class="head">
+        <div><h1>Recurring tasks</h1><p class="sub">Returns and filings that repeat. Each one is added to the task board automatically, a set number of days before it's due.</p></div>
+        <button class="primary" type="button" id="newRuleBtn">+ Add recurring task</button>
+      </div>
+      <div class="table-wrap"><table class="table" id="ruleTable">
+        <thead><tr><th>Task</th><th>Client</th><th>Assigned to</th><th>Schedule</th><th>Next due</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table></div>
+      <section class="panel" id="catPanel" hidden>
+        <h2>Task categories</h2>
+        <p class="help">Used when assigning tasks and setting up recurring work.</p>
+        <div class="chips" id="catChips"></div>
+        <form id="catForm" class="inline-form" autocomplete="off"><label for="catName" class="sr">New category</label><input id="catName" maxlength="50" placeholder="New category name"><button type="submit">Add category</button></form>
+      </section>
+    </section>
+
+    <!-- People -->
     <section id="peoplePage" class="stack-lg" hidden>
       <div class="head">
-        <div>
-          <h1>People</h1>
-          <p class="sub" id="peopleSub"></p>
-        </div>
+        <div><h1>People</h1><p class="sub" id="peopleSub"></p></div>
         <button class="primary" type="button" id="newPersonBtn">+ Add person</button>
       </div>
       <div id="peopleList" class="stack-lg"></div>
@@ -105,25 +138,101 @@
   <form id="taskForm" class="stack" method="dialog" autocomplete="off">
     <h2 id="taskDlgTitle">Assign task</h2>
     <label for="tTitle">Task<input id="tTitle" required maxlength="160"></label>
+    <div class="row2">
+      <label for="tCat">Task category<select id="tCat"></select></label>
+      <label for="tClient">Client<select id="tClient"></select></label>
+    </div>
     <label for="tWho">Assign to<select id="tWho" required></select></label>
     <div class="row2">
       <label for="tPri">Priority<select id="tPri"><option value="high">High</option><option value="medium" selected>Medium</option><option value="low">Low</option></select></label>
       <label for="tDue">Due date<input id="tDue" type="date"></label>
     </div>
-    <label for="tNotes">Instructions<textarea id="tNotes" maxlength="2000" rows="4"></textarea></label>
+    <label for="tNotes">Instructions<textarea id="tNotes" maxlength="2000" rows="3"></textarea></label>
     <p class="form-error" id="taskError" role="alert" hidden></p>
     <div class="dlg-actions"><button type="button" class="ghost" data-close>Cancel</button><button class="primary" type="submit" id="taskSave">Assign task</button></div>
   </form>
 </dialog>
 
-<!-- Progress note dialog -->
+<!-- Progress note -->
 <dialog id="noteDlg">
   <form id="noteForm" class="stack" method="dialog" autocomplete="off">
     <h2>Progress note</h2>
     <p class="help" id="noteFor"></p>
     <label for="nText">What's the latest?<textarea id="nText" maxlength="1000" rows="4"></textarea></label>
-    <p class="form-error" id="noteError" role="alert" hidden></p>
     <div class="dlg-actions"><button type="button" class="ghost" data-close>Cancel</button><button class="primary" type="submit">Save note</button></div>
+  </form>
+</dialog>
+
+<!-- Client dialog -->
+<dialog id="clientDlg" class="wide-dlg">
+  <form id="clientForm" class="stack" method="dialog" autocomplete="off">
+    <h2 id="clientDlgTitle">Add client</h2>
+    <div class="row2">
+      <label for="kName">Client name<input id="kName" required maxlength="120"></label>
+      <label for="kCode">Client code<input id="kCode" maxlength="30" placeholder="e.g. CBG-014"></label>
+    </div>
+    <div class="row3">
+      <label for="kType">Type<select id="kType"></select></label>
+      <label for="kNtn">NTN<input id="kNtn" maxlength="30"></label>
+      <label for="kStrn">STRN<input id="kStrn" maxlength="30"></label>
+    </div>
+    <div class="row3">
+      <label for="kCnic">CNIC<input id="kCnic" maxlength="20" placeholder="35202-1234567-1"></label>
+      <label for="kContact">Contact person<input id="kContact" maxlength="80"></label>
+      <label for="kPhone">Phone<input id="kPhone" maxlength="40"></label>
+    </div>
+    <label for="kEmail">Email<input id="kEmail" type="email" maxlength="120"></label>
+    <div class="row2">
+      <label for="kMgr" id="kMgrWrap">Manager<select id="kMgr"></select></label>
+      <div class="field"><span class="flabel">Staff working on this client</span><div class="checks" id="kStaff"></div></div>
+    </div>
+    <label for="kNotes">Notes<textarea id="kNotes" maxlength="2000" rows="2"></textarea></label>
+    <label class="check" id="kActiveWrap"><input type="checkbox" id="kActive" checked> Active client</label>
+    <p class="form-error" id="clientError" role="alert" hidden></p>
+    <div class="dlg-actions"><button type="button" class="ghost" data-close>Cancel</button><button class="primary" type="submit" id="clientSave">Save client</button></div>
+  </form>
+</dialog>
+
+<!-- Portal login dialog -->
+<dialog id="loginDlg">
+  <form id="portalForm" class="stack" method="dialog" autocomplete="off">
+    <h2 id="portalTitle">Portal login</h2>
+    <p class="help" id="portalFor"></p>
+    <label for="pgId">User ID / Registration no.<input id="pgId" maxlength="80" autocomplete="off"></label>
+    <label for="pgPass">Password<input id="pgPass" type="text" maxlength="200" autocomplete="off" spellcheck="false"></label>
+    <label for="pgPin">PIN (if any)<input id="pgPin" type="text" maxlength="50" autocomplete="off" spellcheck="false"></label>
+    <p class="help" id="portalHint">Leave password or PIN empty to keep what's saved.</p>
+    <label class="check"><input type="checkbox" id="pgClear"> Remove the saved password and PIN</label>
+    <p class="form-error" id="portalError" role="alert" hidden></p>
+    <div class="dlg-actions"><button type="button" class="ghost danger" id="pgDelete">Delete login</button><span class="grow"></span><button type="button" class="ghost" data-close>Cancel</button><button class="primary" type="submit">Save login</button></div>
+  </form>
+</dialog>
+
+<!-- Recurring dialog -->
+<dialog id="ruleDlg" class="wide-dlg">
+  <form id="ruleForm" class="stack" method="dialog" autocomplete="off">
+    <h2 id="ruleDlgTitle">Add recurring task</h2>
+    <div class="presets" id="presets"><span class="flabel">Quick start</span></div>
+    <label for="rTitle">Task name<input id="rTitle" required maxlength="120" placeholder="e.g. Sales Tax Return"></label>
+    <div class="row2">
+      <label for="rCat">Task category<select id="rCat"></select></label>
+      <label for="rClient">Client<select id="rClient"></select></label>
+    </div>
+    <label for="rWho">Assign to<select id="rWho" required></select></label>
+    <div class="row3">
+      <label for="rFreq">Repeats<select id="rFreq"><option value="monthly">Monthly</option><option value="quarterly">Quarterly</option><option value="annual">Yearly</option></select></label>
+      <label for="rDay">Due on day<input id="rDay" type="number" min="1" max="31" value="15" required></label>
+      <label for="rMonth" id="rMonthWrap">Due in month<select id="rMonth"></select></label>
+    </div>
+    <div class="field" id="rMonthsWrap"><span class="flabel">Due in these months</span><div class="checks months" id="rMonths"></div></div>
+    <div class="row2">
+      <label for="rLead">Add to board this many days before due<input id="rLead" type="number" min="0" max="60" value="10"></label>
+      <label for="rPri">Priority<select id="rPri"><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option></select></label>
+    </div>
+    <label for="rNotes">Instructions<textarea id="rNotes" maxlength="2000" rows="2"></textarea></label>
+    <p class="help" id="rPreview"></p>
+    <p class="form-error" id="ruleError" role="alert" hidden></p>
+    <div class="dlg-actions"><button type="button" class="ghost" data-close>Cancel</button><button class="primary" type="submit" id="ruleSave">Save recurring task</button></div>
   </form>
 </dialog>
 
@@ -136,18 +245,18 @@
       <label for="uMgr" id="uMgrWrap">Reports to<select id="uMgr"></select></label>
     </div>
     <label for="uName">Full name<input id="uName" required maxlength="80"></label>
-    <label for="uTitle">Job title<input id="uTitle" maxlength="60" placeholder="e.g. Accounts Officer"></label>
-    <div class="row2" id="credRow">
+    <label for="uTitle">Job title<input id="uTitle" maxlength="60" placeholder="e.g. Tax Associate"></label>
+    <div class="row2">
       <label for="uLogin">Login ID<input id="uLogin" required maxlength="40" pattern="[A-Za-z0-9._\-]{3,40}" placeholder="e.g. ahmed.k"></label>
       <label for="uPass">Temporary password<input id="uPass" required minlength="8" maxlength="128"></label>
     </div>
-    <p class="help" id="personHelp">They'll be asked to choose their own password at first sign-in.</p>
+    <p class="help">They'll be asked to choose their own password at first sign-in.</p>
     <p class="form-error" id="personError" role="alert" hidden></p>
     <div class="dlg-actions"><button type="button" class="ghost" data-close>Cancel</button><button class="primary" type="submit" id="personSave">Add person</button></div>
   </form>
 </dialog>
 
-<!-- Reset password dialog -->
+<!-- Reset password -->
 <dialog id="resetDlg">
   <form id="resetForm" class="stack" method="dialog" autocomplete="off">
     <h2>Reset password</h2>

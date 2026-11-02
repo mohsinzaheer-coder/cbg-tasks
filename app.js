@@ -4,19 +4,38 @@
   const STATUS = [['todo', 'To do'], ['doing', 'In progress'], ['done', 'Done']];
   const PRI = { high: 0, medium: 1, low: 2 };
   const ROLE = { owner: 'Owner', manager: 'Manager', staff: 'Staff' };
-  const state = { me: null, users: [], tasks: [], tab: 'tasks', confirm: null, editing: null };
+  const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+  const state = { me: null, config: {}, users: [], tasks: [], clients: [], categories: [], rules: [], tab: 'tasks', confirm: null, editing: null, clientId: null };
+
+  /* Common Pakistan filing deadlines as starting points. Change the day if a notification moves it. */
+  const PRESETS = [
+    { label: 'Sales Tax Return (FBR)', title: 'Sales Tax Return', cat: 'Sales Tax', frequency: 'monthly', dueDay: 18 },
+    { label: 'Annex H', title: 'Annex H', cat: 'Annex H', frequency: 'monthly', dueDay: 18 },
+    { label: 'Withholding Statement', title: 'Withholding Tax Statement', cat: 'Withholding Tax', frequency: 'quarterly', dueDay: 20, months: [1, 4, 7, 10] },
+    { label: 'Income Tax Return – Individual/AOP', title: 'Income Tax Return', cat: 'Income Tax', frequency: 'annual', dueDay: 30, dueMonth: 9 },
+    { label: 'Income Tax Return – Company', title: 'Income Tax Return', cat: 'Income Tax', frequency: 'annual', dueDay: 31, dueMonth: 12 },
+    { label: 'PRA Return', title: 'PRA Sales Tax on Services Return', cat: 'Provincial Sales Tax', frequency: 'monthly', dueDay: 18 },
+    { label: 'SRB Return', title: 'SRB Sales Tax on Services Return', cat: 'Provincial Sales Tax', frequency: 'monthly', dueDay: 18 },
+  ];
 
   /* ---------- utilities ---------- */
   function el(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
   function btn(text, cls, fn) { const b = el('button', cls, text); b.type = 'button'; b.onclick = fn; return b; }
+  function opt(sel, value, text) { const o = el('option', null, text); o.value = value; sel.append(o); return o; }
   const initials = n => (n || '?').trim().split(/\s+/).slice(0, 2).map(w => w[0]).join('').toUpperCase() || '?';
-  const today = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
+  const today = () => state.config.today && new Date().toDateString() === state.loadedOn ? state.config.today : (() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; })();
   const fmtDate = s => { if (!s) return ''; const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' }); };
+  const fmtTime = ms => new Date(ms).toLocaleString(undefined, { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' });
   const isLate = t => t.status !== 'done' && t.due && t.due < today();
   const userById = id => state.users.find(u => u.id === id);
-  let toastT; function toast(m) { const t = $('#toast'); t.textContent = m; t.hidden = false; clearTimeout(toastT); toastT = setTimeout(() => t.hidden = true, 2600); }
+  const clientById = id => state.clients.find(c => c.id === id);
+  const lead = () => state.me && state.me.role !== 'staff';
+  let toastT; function toast(m) { const t = $('#toast'); t.textContent = m; t.hidden = false; clearTimeout(toastT); toastT = setTimeout(() => t.hidden = true, 2800); }
   function showErr(id, msg) { const e = $(id); e.textContent = msg || ''; e.hidden = !msg; }
   function tempPassword() { const c = 'ABCDEFGHJKMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz'; const a = new Uint32Array(7); crypto.getRandomValues(a); return 'Cbg-' + [...a].map(n => c[n % c.length]).join('') + (a[0] % 90 + 10); }
+  async function copy(text, what) {
+    try { await navigator.clipboard.writeText(text); toast(what + ' copied'); } catch { toast('Copy didn\'t work here. Select the text and copy it.'); }
+  }
 
   async function api(method, url, body) {
     const res = await fetch(url, { method, credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-CBG': '1' }, body: body ? JSON.stringify(body) : undefined });
@@ -26,31 +45,22 @@
     return data;
   }
 
-  /* ---------- views ---------- */
-  function show(view) {
-    $('#loginView').hidden = view !== 'login';
-    $('#pwView').hidden = view !== 'password';
-    $('#appView').hidden = view !== 'app';
-  }
-
+  /* ---------- auth views ---------- */
+  function show(view) { $('#loginView').hidden = view !== 'login'; $('#pwView').hidden = view !== 'password'; $('#appView').hidden = view !== 'app'; }
   async function boot() {
-    try { const { user } = await api('GET', '/api/me'); state.me = user; }
+    try { const r = await api('GET', '/api/me'); state.me = r.user; state.config = r.config; state.loadedOn = new Date().toDateString(); }
     catch { show('login'); return; }
     if (state.me.mustChange) return openPassword(true);
     enterApp();
   }
-
   $('#loginForm').addEventListener('submit', async e => {
-    e.preventDefault(); showErr('#loginError');
-    const b = e.submitter; b.disabled = true;
+    e.preventDefault(); showErr('#loginError'); const b = e.submitter; b.disabled = true;
     try {
-      const { user } = await api('POST', '/api/login', { username: $('#lUser').value.trim(), password: $('#lPass').value });
-      state.me = user; $('#loginForm').reset();
-      if (user.mustChange) openPassword(true); else enterApp();
+      await api('POST', '/api/login', { username: $('#lUser').value.trim(), password: $('#lPass').value });
+      $('#loginForm').reset(); await boot();
     } catch (err) { showErr('#loginError', err.message); }
     finally { b.disabled = false; }
   });
-
   function openPassword(forced) {
     $('#pwForm').reset(); showErr('#pwError');
     $('#pwTitle').textContent = forced ? 'Choose your password' : 'Change password';
@@ -63,79 +73,90 @@
     e.preventDefault(); showErr('#pwError');
     if ($('#pNew').value !== $('#pNew2').value) return showErr('#pwError', 'The two new passwords don\'t match.');
     const b = e.submitter; b.disabled = true;
-    try {
-      await api('POST', '/api/me/password', { current: $('#pCur').value, next: $('#pNew').value });
-      state.me.mustChange = false; toast('Password saved'); enterApp();
-    } catch (err) { showErr('#pwError', err.message); }
+    try { await api('POST', '/api/me/password', { current: $('#pCur').value, next: $('#pNew').value }); state.me.mustChange = false; toast('Password saved'); enterApp(); }
+    catch (err) { showErr('#pwError', err.message); }
     finally { b.disabled = false; }
   });
-
   $('#logout').onclick = async () => { try { await api('POST', '/api/logout'); } catch { } state.me = null; show('login'); $('#lUser').focus(); };
 
   async function enterApp() {
-    show('app');
-    const me = state.me;
+    show('app'); const me = state.me;
     $('#meName').textContent = me.name; $('#meRole').textContent = ROLE[me.role] + (me.title && me.title !== ROLE[me.role] ? ' · ' + me.title : '');
-    $('#tabs').hidden = me.role === 'staff';
-    $('#newTaskBtn').hidden = me.role === 'staff';
-    $('#fPersonWrap').hidden = me.role === 'staff';
+    document.querySelectorAll('#tabs [data-role="lead"]').forEach(b => b.hidden = !lead());
+    $('#newTaskBtn').hidden = !lead(); $('#fPersonWrap').hidden = !lead();
+    $('#newClientBtn').hidden = !lead(); $('#cMgrWrap').hidden = me.role !== 'owner';
+    $('#credsOff').hidden = !!state.config.credsEnabled;
     $('#tasksTitle').textContent = me.role === 'staff' ? 'My tasks' : me.role === 'manager' ? 'My team\'s tasks' : 'All tasks';
-    $('#tasksSub').textContent = me.role === 'staff' ? 'Tasks assigned to you. Update the status as you go.' :
-      me.role === 'manager' ? 'Tasks for you and the staff who report to you.' : 'Every task across all managers and staff.';
+    $('#tasksSub').textContent = me.role === 'staff' ? 'Tasks assigned to you. Update the status as you go.' : me.role === 'manager' ? 'Tasks for you and the staff who report to you.' : 'Every task across all managers and staff.';
+    $('#clientsSub').textContent = me.role === 'owner' ? 'All clients, their registrations and portal logins.' : me.role === 'manager' ? 'Clients assigned to you and your staff.' : 'Clients you work on.';
     $('#peopleSub').textContent = me.role === 'owner' ? 'Managers and the staff who report to each of them.' : 'The staff who report to you.';
     $('#newPersonBtn').textContent = me.role === 'owner' ? '+ Add person' : '+ Add staff member';
-    setTab(state.tab === 'people' && me.role !== 'staff' ? 'people' : 'tasks');
+    $('#catPanel').hidden = me.role !== 'owner';
+    if (!lead() && ['recurring', 'people'].includes(state.tab)) state.tab = 'tasks';
+    setTab(state.tab);
     await refresh();
   }
-
   async function refresh() {
     try {
-      const [u, t] = await Promise.all([api('GET', '/api/users'), api('GET', '/api/tasks')]);
-      state.users = u.users; state.tasks = t.tasks; render();
+      const calls = [api('GET', '/api/users'), api('GET', '/api/tasks'), api('GET', '/api/clients'), api('GET', '/api/categories')];
+      if (lead()) calls.push(api('GET', '/api/recurring'));
+      const [u, t, c, k, r] = await Promise.all(calls);
+      state.users = u.users; state.tasks = t.tasks; state.clients = c.clients; state.categories = k.categories; state.rules = r ? r.rules : [];
+      render();
     } catch (err) { if (err.status !== 401) toast(err.message); }
   }
-  document.addEventListener('visibilitychange', () => { if (!document.hidden && state.me && !$('#appView').hidden) refresh(); });
+  document.addEventListener('visibilitychange', () => { if (!document.hidden && state.me && !$('#appView').hidden && !document.querySelector('dialog[open]')) refresh(); });
   setInterval(() => { if (state.me && !document.hidden && !$('#appView').hidden && !document.querySelector('dialog[open]')) refresh(); }, 60000);
 
   function setTab(t) {
     state.tab = t;
     document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === t));
-    $('#tasksPage').hidden = t !== 'tasks'; $('#peoplePage').hidden = t !== 'people';
+    for (const p of ['tasks', 'clients', 'recurring', 'people']) $('#' + p + 'Page').hidden = p !== t;
   }
   $('#tabs').addEventListener('click', e => { const b = e.target.closest('button[data-tab]'); if (b) { setTab(b.dataset.tab); render(); } });
+  function render() {
+    renderFilters(); renderTasks(); renderClients();
+    if (lead()) { renderRules(); renderPeople(); }
+  }
 
-  function render() { renderPersonFilter(); renderTasks(); if (state.me.role !== 'staff') renderPeople(); }
-
-  /* ---------- tasks ---------- */
-  function renderPersonFilter() {
+  /* ---------- filters ---------- */
+  function fillSelect(sel, first, items) {
+    const keep = sel.value; sel.replaceChildren(); if (first) opt(sel, '', first);
+    for (const [v, t] of items) opt(sel, String(v), t);
+    sel.value = [...sel.options].some(o => o.value === keep) ? keep : '';
+  }
+  function renderFilters() {
     const sel = $('#fPerson'); const keep = sel.value;
-    while (sel.options.length > 1) sel.remove(1);
+    sel.replaceChildren(); opt(sel, '', 'Everyone I can see');
     const active = state.users.filter(u => u.active);
     if (state.me.role === 'owner') {
       for (const m of active.filter(u => u.role === 'manager')) {
         const g = el('optgroup'); g.label = m.name + '’s team';
-        const o = el('option', null, 'Whole team of ' + m.name); o.value = 'team:' + m.id; g.append(o);
-        const om = el('option', null, m.name + ' (manager)'); om.value = String(m.id); g.append(om);
-        for (const s of active.filter(u => u.managerId === m.id)) { const os = el('option', null, s.name); os.value = String(s.id); g.append(os); }
+        const o1 = el('option', null, 'Whole team of ' + m.name); o1.value = 'team:' + m.id; g.append(o1);
+        const o2 = el('option', null, m.name + ' (manager)'); o2.value = String(m.id); g.append(o2);
+        for (const s of active.filter(u => u.managerId === m.id)) { const o = el('option', null, s.name); o.value = String(s.id); g.append(o); }
         sel.append(g);
       }
-    } else {
-      for (const u of active) { const o = el('option', null, u.id === state.me.id ? u.name + ' (me)' : u.name); o.value = String(u.id); sel.append(o); }
-    }
+    } else for (const u of active) opt(sel, u.id, u.id === state.me.id ? u.name + ' (me)' : u.name);
     sel.value = [...sel.options].some(o => o.value === keep) ? keep : '';
+    fillSelect($('#fClient'), 'All clients', state.clients.filter(c => c.active).map(c => [c.id, c.name]));
+    fillSelect($('#fCat'), 'All categories', state.categories.map(c => [c.id, c.name]));
+    if (state.me.role === 'owner') fillSelect($('#cMgr'), 'All managers', state.users.filter(u => u.role === 'manager').map(u => [u.id, u.name]));
   }
 
+  /* ---------- tasks ---------- */
   function filteredTasks() {
-    const p = $('#fPerson').value, pri = $('#fPri').value, q = $('#fText').value.trim().toLowerCase();
+    const p = $('#fPerson').value, cl = $('#fClient').value, ct = $('#fCat').value, pri = $('#fPri').value, q = $('#fText').value.trim().toLowerCase();
     return state.tasks.filter(t => {
       if (p.startsWith('team:')) { const mid = Number(p.slice(5)); const u = userById(t.assigneeId); if (!(t.assigneeId === mid || (u && u.managerId === mid))) return false; }
       else if (p && t.assigneeId !== Number(p)) return false;
+      if (cl && t.clientId !== Number(cl)) return false;
+      if (ct && t.categoryId !== Number(ct)) return false;
       if (pri && t.priority !== pri) return false;
-      if (q && !`${t.title} ${t.notes} ${t.progress} ${t.assigneeName}`.toLowerCase().includes(q)) return false;
+      if (q && !`${t.title} ${t.notes} ${t.progress} ${t.assigneeName} ${t.clientName} ${t.categoryName}`.toLowerCase().includes(q)) return false;
       return true;
     });
   }
-
   function renderTasks() {
     const tasks = filteredTasks();
     $('#sOpen').textContent = tasks.filter(t => t.status !== 'done').length;
@@ -145,53 +166,50 @@
     const host = $('#lanes'); host.replaceChildren();
     for (const [key, label] of STATUS) {
       const lane = el('section', 'lane'); lane.dataset.s = key;
-      const list = tasks.filter(t => t.status === key).sort(key === 'done'
-        ? (a, b) => (b.doneAt || 0) - (a.doneAt || 0)
-        : (a, b) => (isLate(b) - isLate(a)) || (PRI[a.priority] - PRI[b.priority]) || (a.due || '9999').localeCompare(b.due || '9999'));
+      const list = tasks.filter(t => t.status === key).sort(key === 'done' ? (a, b) => (b.doneAt || 0) - (a.doneAt || 0)
+        : (a, b) => (isLate(b) - isLate(a)) || (a.due || '9999').localeCompare(b.due || '9999') || (PRI[a.priority] - PRI[b.priority]));
       const h = el('div', 'lane-h'); h.append(el('h3', null, label), el('span', null, String(list.length))); lane.append(h);
-      if (!list.length) {
-        const none = !state.tasks.length;
-        lane.append(el('div', 'lane-empty', key === 'todo' && none
-          ? (state.me.role === 'staff' ? 'No tasks assigned to you yet.' : 'No tasks yet. Use “Assign task” to give someone work.')
-          : 'Nothing here'));
-      }
-      for (const t of list) lane.append(card(t));
+      const shown = key === 'done' ? list.slice(0, 40) : list;
+      if (!list.length) lane.append(el('div', 'lane-empty', key === 'todo' && !state.tasks.length ? (lead() ? 'No tasks yet. Use “Assign task” to give someone work.' : 'No tasks assigned to you yet.') : 'Nothing here'));
+      for (const t of shown) lane.append(card(t));
+      if (list.length > shown.length) lane.append(el('div', 'lane-empty', `Showing the latest ${shown.length} of ${list.length} done tasks`));
       host.append(lane);
     }
   }
-
   function card(t) {
     const me = state.me; const mine = t.assigneeId === me.id;
     const c = el('article', 'card' + (isLate(t) ? ' overdue' : ''));
+    const tags = el('div', 'meta');
+    if (t.clientName) tags.append(el('span', 'chip client', t.clientName));
+    if (t.categoryName) tags.append(el('span', 'chip', t.categoryName));
+    if (t.recurringId) tags.append(el('span', 'repeat', '↻ Recurring'));
+    if (tags.children.length) c.append(tags);
     c.append(el('p', 'card-t', t.title));
     if (t.notes) c.append(el('p', 'card-n', t.notes));
     if (t.progress) { const p = el('p', 'progress'); p.append(el('b', null, 'Progress'), document.createTextNode(t.progress)); c.append(p); }
     const m = el('div', 'meta');
     m.append(el('span', 'pill p-' + t.priority, t.priority));
-    if (me.role !== 'staff' || !mine) { const w = el('span', 'who'); w.append(el('span', 'av', initials(t.assigneeName)), document.createTextNode(mine ? 'Me' : t.assigneeName)); m.append(w); }
+    if (lead() || !mine) { const w = el('span', 'who'); w.append(el('span', 'av', initials(t.assigneeName)), document.createTextNode(mine ? 'Me' : t.assigneeName)); m.append(w); }
     if (t.due) m.append(el('span', isLate(t) ? 'late' : '', (isLate(t) ? 'Overdue · ' : 'Due ') + fmtDate(t.due)));
-    if (t.createdBy !== me.id) m.append(el('span', null, 'From ' + t.createdByName));
+    if (t.createdBy !== me.id && !t.recurringId) m.append(el('span', null, 'From ' + t.createdByName));
     c.append(m);
-
-    const canStatus = mine || t.canEdit;
-    if (!canStatus) return c;
+    if (!(mine || t.canEdit)) return c;
     const a = el('div', 'actions'); const key = 'task:' + t.id;
     if (state.confirm === key) {
-      const cf = el('div', 'confirm'); cf.append(el('span', null, 'Delete this task?'),
-        btn('Delete', 'ghost danger', () => delTask(t)), btn('Keep', 'ghost', () => { state.confirm = null; renderTasks(); }));
+      const cf = el('div', 'confirm'); cf.append(el('span', null, 'Delete this task?'), btn('Delete', 'ghost danger', () => delTask(t)), btn('Keep', 'ghost', () => { state.confirm = null; renderTasks(); }));
       a.append(cf); c.append(a); return c;
     }
     for (const [k] of STATUS) if (k !== t.status) a.append(btn(k === 'done' ? 'Mark done' : k === 'doing' ? 'Start' : 'Back to To do', 'ghost', () => patchTask(t, { status: k })));
     a.append(btn(t.progress ? 'Edit note' : 'Add note', 'ghost', () => openNote(t)));
-    if (t.canEdit) { a.append(btn('Edit', 'ghost', () => openTask(t)), btn('Delete', 'ghost danger', () => { state.confirm = key; renderTasks(); })); }
+    if (t.clientId && clientById(t.clientId)) a.append(btn('Client logins', 'ghost', () => { state.clientId = t.clientId; setTab('clients'); render(); }));
+    if (t.canEdit) a.append(btn('Edit', 'ghost', () => openTask(t)), btn('Delete', 'ghost danger', () => { state.confirm = key; renderTasks(); }));
     c.append(a); return c;
   }
-
   async function patchTask(t, patch, msg) {
     try {
       const { task } = await api('PATCH', '/api/tasks/' + t.id, patch);
-      state.tasks = state.tasks.map(x => x.id === task.id ? task : x); renderTasks(); if (state.me.role !== 'staff') renderPeople();
-      toast(msg || (patch.status === 'done' ? 'Marked done' : patch.status === 'doing' ? 'Started' : patch.status ? 'Moved back to To do' : 'Saved'));
+      state.tasks = state.tasks.map(x => x.id === task.id ? task : x); renderTasks(); if (lead()) renderPeople();
+      toast(msg || (patch.status === 'done' ? 'Marked done' : patch.status === 'doing' ? 'Started' : 'Moved back to To do'));
       return true;
     } catch (err) { toast(err.message); return false; }
   }
@@ -200,42 +218,53 @@
     try { await api('DELETE', '/api/tasks/' + t.id); state.tasks = state.tasks.filter(x => x.id !== t.id); render(); toast('Task deleted'); }
     catch (err) { toast(err.message); renderTasks(); }
   }
-  ['#fPerson', '#fPri'].forEach(s => $(s).addEventListener('change', renderTasks));
+  ['#fPerson', '#fClient', '#fCat', '#fPri'].forEach(s => $(s).addEventListener('change', renderTasks));
   $('#fText').addEventListener('input', renderTasks);
 
-  /* task dialog */
-  function assignable() {
+  /* shared pickers */
+  function fillPeople(sel) {
+    sel.replaceChildren(); opt(sel, '', 'Choose a person');
     const active = state.users.filter(u => u.active);
-    if (state.me.role === 'owner') return active.filter(u => u.role !== 'owner');
-    return active;
-  }
-  function openTask(t) {
-    state.editing = t || null;
-    $('#taskForm').reset(); showErr('#taskError');
-    const sel = $('#tWho'); sel.replaceChildren();
-    const ph = el('option', null, 'Choose a person'); ph.value = ''; sel.append(ph);
-    const people = assignable();
     if (state.me.role === 'owner') {
-      for (const m of people.filter(u => u.role === 'manager')) {
+      for (const m of active.filter(u => u.role === 'manager')) {
         const g = el('optgroup'); g.label = m.name + '’s team';
         const om = el('option', null, m.name + ' (manager)'); om.value = m.id; g.append(om);
-        for (const s of people.filter(u => u.managerId === m.id)) { const o = el('option', null, s.name + (s.title ? ' · ' + s.title : '')); o.value = s.id; g.append(o); }
+        for (const s of active.filter(u => u.managerId === m.id)) { const o = el('option', null, s.name + (s.title ? ' · ' + s.title : '')); o.value = s.id; g.append(o); }
         sel.append(g);
       }
-    } else {
-      for (const u of people) { const o = el('option', null, u.id === state.me.id ? u.name + ' (me)' : u.name + (u.title ? ' · ' + u.title : '')); o.value = u.id; sel.append(o); }
+    } else for (const u of active) opt(sel, u.id, u.id === state.me.id ? u.name + ' (me)' : u.name + (u.title ? ' · ' + u.title : ''));
+  }
+  function fillClients(sel, includeId) { sel.replaceChildren(); opt(sel, '', 'No client (internal)'); for (const c of state.clients.filter(c => c.active || c.id === includeId)) opt(sel, c.id, c.name + (c.code ? ` (${c.code})` : '')); }
+  function fillCats(sel) { sel.replaceChildren(); opt(sel, '', 'No category'); for (const c of state.categories) opt(sel, c.id, c.name); }
+  // When a client is chosen, pre-select a person who works on it
+  function suggestPerson(clientSel, whoSel) {
+    clientSel.onchange = () => {
+      const c = clientById(Number(clientSel.value)); if (!c || whoSel.value) return;
+      const pick = c.staffIds.find(id => userById(id)?.active) ?? (userById(c.managerId) ? c.managerId : null);
+      if (pick != null && [...whoSel.options].some(o => o.value === String(pick))) whoSel.value = String(pick);
+    };
+  }
+
+  /* task dialog */
+  function openTask(t) {
+    state.editing = t || null; $('#taskForm').reset(); showErr('#taskError');
+    fillCats($('#tCat')); fillClients($('#tClient'), t?.clientId); fillPeople($('#tWho'));
+    suggestPerson($('#tClient'), $('#tWho'));
+    if (t) { $('#tTitle').value = t.title; $('#tWho').value = String(t.assigneeId); $('#tPri').value = t.priority; $('#tDue').value = t.due; $('#tNotes').value = t.notes; $('#tCat').value = t.categoryId ?? ''; $('#tClient').value = t.clientId ?? ''; }
+    else {
+      const fp = $('#fPerson').value; if (fp && !fp.startsWith('team:')) $('#tWho').value = fp;
+      if ($('#fClient').value) $('#tClient').value = $('#fClient').value;
+      if ($('#fCat').value) $('#tCat').value = $('#fCat').value;
     }
-    if (t) { $('#tTitle').value = t.title; sel.value = String(t.assigneeId); $('#tPri').value = t.priority; $('#tDue').value = t.due; $('#tNotes').value = t.notes; }
-    else { const fp = $('#fPerson').value; if (fp && !fp.startsWith('team:')) sel.value = fp; }
-    $('#taskDlgTitle').textContent = t ? 'Edit task' : 'Assign task';
-    $('#taskSave').textContent = t ? 'Save changes' : 'Assign task';
-    if (!people.length || (state.me.role === 'owner' && !people.length)) showErr('#taskError', 'Add people on the People tab first.');
+    $('#taskDlgTitle').textContent = t ? 'Edit task' : 'Assign task'; $('#taskSave').textContent = t ? 'Save changes' : 'Assign task';
+    if ($('#tWho').options.length < 2) showErr('#taskError', 'Add people on the People tab first.');
     $('#taskDlg').showModal(); $('#tTitle').focus();
   }
   $('#newTaskBtn').onclick = () => openTask(null);
   $('#taskForm').addEventListener('submit', async e => {
     e.preventDefault(); showErr('#taskError');
-    const body = { title: $('#tTitle').value.trim(), assigneeId: Number($('#tWho').value), priority: $('#tPri').value, due: $('#tDue').value, notes: $('#tNotes').value.trim() };
+    const body = { title: $('#tTitle').value.trim(), assigneeId: Number($('#tWho').value), priority: $('#tPri').value, due: $('#tDue').value, notes: $('#tNotes').value.trim(),
+      categoryId: $('#tCat').value ? Number($('#tCat').value) : null, clientId: $('#tClient').value ? Number($('#tClient').value) : null };
     if (!body.assigneeId) return showErr('#taskError', 'Choose who this task is for.');
     const b = $('#taskSave'); b.disabled = true;
     try {
@@ -245,64 +274,321 @@
     } catch (err) { showErr('#taskError', err.message); }
     finally { b.disabled = false; }
   });
-
-  /* note dialog */
   let noteTask = null;
-  function openNote(t) { noteTask = t; showErr('#noteError'); $('#noteFor').textContent = t.title; $('#nText').value = t.progress || ''; $('#noteDlg').showModal(); $('#nText').focus(); }
-  $('#noteForm').addEventListener('submit', async e => {
-    e.preventDefault();
-    if (await patchTask(noteTask, { progress: $('#nText').value.trim() }, 'Note saved')) $('#noteDlg').close();
+  function openNote(t) { noteTask = t; $('#noteFor').textContent = t.title; $('#nText').value = t.progress || ''; $('#noteDlg').showModal(); $('#nText').focus(); }
+  $('#noteForm').addEventListener('submit', async e => { e.preventDefault(); if (await patchTask(noteTask, { progress: $('#nText').value.trim() }, 'Note saved')) $('#noteDlg').close(); });
+
+  /* ---------- clients ---------- */
+  function filteredClients() {
+    const q = $('#cSearch').value.trim().toLowerCase(), mgr = $('#cMgr').value, all = $('#cShow').value === 'all';
+    return state.clients.filter(c => (all || c.active) && (!mgr || c.managerId === Number(mgr)) &&
+      (!q || `${c.name} ${c.code} ${c.ntn} ${c.strn} ${c.cnic} ${c.contactPerson}`.toLowerCase().includes(q)));
+  }
+  function renderClients() {
+    const list = $('#clientList'); list.replaceChildren();
+    const items = filteredClients();
+    if (!items.length) list.append(el('p', 'empty-state', state.clients.length ? 'No clients match.' : lead() ? 'No clients yet. Use “Add client” to create the first one.' : 'No clients have been assigned to you yet.'));
+    if (state.clientId && !state.clients.some(c => c.id === state.clientId)) state.clientId = null;
+    if (!state.clientId && items.length && matchMedia('(min-width: 861px)').matches) state.clientId = items[0].id;
+    for (const c of items) {
+      const b = btn('', 'client-item' + (c.id === state.clientId ? ' on' : ''), () => { state.clientId = c.id; renderClients(); if (!matchMedia('(min-width: 861px)').matches) $('#clientDetail').scrollIntoView({ block: 'start' }); });
+      b.setAttribute('role', 'listitem');
+      b.append(el('b', null, c.name));
+      const open = state.tasks.filter(t => t.clientId === c.id && t.status !== 'done').length;
+      b.append(el('small', null, [c.code, c.entityType, c.ntn && 'NTN ' + c.ntn].filter(Boolean).join(' · ') || ' '));
+      const s = el('small', null, `${open} open task${open === 1 ? '' : 's'}` + (c.managerName ? ' · ' + c.managerName : ''));
+      b.append(s); if (!c.active) b.append(el('small', 'off', 'Archived'));
+      list.append(b);
+    }
+    renderClientDetail();
+  }
+  ['#cSearch'].forEach(s => $(s).addEventListener('input', renderClients));
+  ['#cMgr', '#cShow'].forEach(s => $(s).addEventListener('change', renderClients));
+
+  const revealed = new Map(); // `${clientId}:${auth}` -> {password,pin,timer}
+  function renderClientDetail() {
+    const box = $('#clientDetail'); box.replaceChildren();
+    const c = clientById(state.clientId);
+    if (!c) { box.append(el('p', 'empty-state', 'Select a client to see their details and portal logins.')); return; }
+    const head = el('div', 'cd-head'); const h = el('div');
+    h.append(el('h2', null, c.name)); h.append(el('p', 'sub', [c.code, c.entityType, c.active ? '' : 'Archived'].filter(Boolean).join(' · ')));
+    head.append(h);
+    const hb = el('div', 'mini');
+    if (lead()) hb.append(btn('Assign task', 'ghost', () => { $('#fClient').value = String(c.id); openTask(null); $('#tClient').value = String(c.id); $('#tClient').onchange(); }));
+    if (c.canEdit) hb.append(btn('Edit client', '', () => openClient(c)));
+    head.append(hb); box.append(head);
+
+    const dl = el('dl', 'facts');
+    const staffNames = c.staffIds.map(id => userById(id)?.name).filter(Boolean);
+    for (const [k, v] of [['NTN', c.ntn], ['STRN', c.strn], ['CNIC', c.cnic], ['Contact person', c.contactPerson], ['Phone', c.phone], ['Email', c.email], ['Manager', c.managerName], ['Staff', staffNames.join(', ')]]) {
+      if (!v) continue; const d = el('div'); d.append(el('dt', null, k), el('dd', null, v)); dl.append(d);
+    }
+    if (dl.children.length) box.append(dl);
+    if (c.notes) box.append(el('p', 'card-n', c.notes));
+
+    const ph = el('div', 'cd-head'); ph.append(el('h3', null, 'Portal logins')); box.append(ph);
+    const grid = el('div', 'portals');
+    for (const auth of state.config.authorities || []) {
+      const l = c.logins.find(x => x.authority === auth);
+      const p = el('div', 'portal' + (l ? '' : ' empty'));
+      const t = el('h4', null, auth); p.append(t);
+      if (!l) { p.append(el('span', null, 'Not saved')); if (c.canEdit) { const r = el('div', 'row-btns'); r.append(btn('Add login', 'ghost', () => openPortal(c, auth, null))); p.append(r); } grid.append(p); continue; }
+      const key = c.id + ':' + auth; const rv = revealed.get(key);
+      const kv1 = el('div', 'kv'); kv1.append(el('span', null, 'User ID'), el('code', null, l.loginId || '—')); p.append(kv1);
+      const kv2 = el('div', 'kv'); kv2.append(el('span', null, 'Password'), el('code', null, l.hasPassword ? (rv ? rv.password : '••••••••') : '—')); p.append(kv2);
+      if (l.hasPin) { const kv3 = el('div', 'kv'); kv3.append(el('span', null, 'PIN'), el('code', null, rv ? rv.pin : '••••')); p.append(kv3); }
+      const r = el('div', 'row-btns');
+      if (l.loginId) r.append(btn('Copy ID', 'ghost', () => copy(l.loginId, 'User ID')));
+      if (l.hasPassword || l.hasPin) {
+        if (rv) { r.append(btn('Copy password', 'ghost', () => copy(rv.password, 'Password')), btn('Hide', 'ghost', () => { clearTimeout(rv.timer); revealed.delete(key); renderClientDetail(); })); }
+        else r.append(btn('Show password', 'ghost', () => reveal(c, auth)));
+      }
+      if (c.canEdit) r.append(btn('Edit', 'ghost', () => openPortal(c, auth, l)));
+      p.append(r); p.append(el('small', 'help', 'Updated ' + fmtTime(l.updatedAt)));
+      grid.append(p);
+    }
+    box.append(grid);
+    if (!state.config.credsEnabled) box.append(el('p', 'help', 'Passwords can\'t be saved or shown until CRED_KEY is set on the server.'));
+    else box.append(el('p', 'help', 'Passwords are stored encrypted. Each time someone shows a password it is recorded, and it hides again after 30 seconds.'));
+
+    const openTasks = state.tasks.filter(t => t.clientId === c.id && t.status !== 'done').sort((a, b) => (a.due || '9999').localeCompare(b.due || '9999'));
+    const th = el('div', 'cd-head'); th.append(el('h3', null, `Open tasks (${openTasks.length})`)); box.append(th);
+    if (openTasks.length) {
+      const ul = el('ul', 'log');
+      for (const t of openTasks.slice(0, 12)) { const li = el('li'); li.append(el('b', null, t.title)); li.append(el('span', isLate(t) ? 'late' : '', [t.assigneeName, t.due ? (isLate(t) ? 'overdue ' : 'due ') + fmtDate(t.due) : ''].filter(Boolean).join(' · '))); ul.append(li); }
+      box.append(ul);
+    } else box.append(el('p', 'help', 'No open tasks for this client.'));
+
+    if (c.canEdit) {
+      const lh = el('div', 'cd-head'); lh.append(el('h3', null, 'Password access log'));
+      const lb = btn('Show log', 'ghost', async () => {
+        try {
+          const { log } = await api('GET', `/api/clients/${c.id}/access-log`);
+          const ul = el('ul', 'log');
+          if (!log.length) ul.append(el('li', null, 'No one has viewed these passwords yet.'));
+          for (const r of log) { const li = el('li'); li.append(el('b', null, `${r.name} viewed ${r.authority}`), el('span', null, fmtTime(r.at))); ul.append(li); }
+          lb.replaceWith(ul);
+        } catch (err) { toast(err.message); }
+      });
+      box.append(lh, lb);
+    }
+  }
+  async function reveal(c, auth) {
+    try {
+      const r = await api('POST', `/api/clients/${c.id}/logins/${auth}/reveal`);
+      const key = c.id + ':' + auth;
+      const timer = setTimeout(() => { revealed.delete(key); if (state.clientId === c.id) renderClientDetail(); }, 30000);
+      revealed.set(key, { password: r.password, pin: r.pin, timer }); renderClientDetail();
+    } catch (err) { toast(err.message); }
+  }
+
+  /* client dialog */
+  let editClient = null;
+  function staffChecks(managerId, selected) {
+    const box = $('#kStaff'); box.replaceChildren();
+    const staff = state.users.filter(u => u.role === 'staff' && u.active && (state.me.role === 'manager' ? u.managerId === state.me.id : (!managerId || u.managerId === managerId)));
+    if (!staff.length) box.append(el('span', 'help', managerId || state.me.role === 'manager' ? 'No staff in this team yet.' : 'Choose a manager to see their staff.'));
+    for (const s of staff) { const l = el('label'); const i = el('input'); i.type = 'checkbox'; i.value = s.id; i.checked = selected.includes(s.id); i.id = 'ks-' + s.id; l.append(i, document.createTextNode(s.name)); box.append(l); }
+  }
+  function openClient(c) {
+    editClient = c || null; $('#clientForm').reset(); showErr('#clientError');
+    const type = $('#kType'); type.replaceChildren(); for (const t of state.config.entityTypes || []) opt(type, t, t);
+    const owner = state.me.role === 'owner';
+    $('#kMgrWrap').hidden = !owner; $('#kActiveWrap').hidden = !owner || !c;
+    const mgr = $('#kMgr'); mgr.replaceChildren(); opt(mgr, '', 'No manager yet');
+    for (const m of state.users.filter(u => u.role === 'manager' && (u.active || u.id === c?.managerId))) opt(mgr, m.id, m.name);
+    if (c) {
+      $('#kName').value = c.name; $('#kCode').value = c.code; type.value = c.entityType; $('#kNtn').value = c.ntn; $('#kStrn').value = c.strn; $('#kCnic').value = c.cnic;
+      $('#kContact').value = c.contactPerson; $('#kPhone').value = c.phone; $('#kEmail').value = c.email; $('#kNotes').value = c.notes; mgr.value = c.managerId ?? ''; $('#kActive').checked = c.active;
+    } else type.value = 'Company';
+    staffChecks(Number(mgr.value) || null, c ? c.staffIds : []);
+    mgr.onchange = () => staffChecks(Number(mgr.value) || null, [...document.querySelectorAll('#kStaff input:checked')].map(i => Number(i.value)));
+    $('#clientDlgTitle').textContent = c ? 'Edit client' : 'Add client';
+    $('#clientDlg').showModal(); $('#kName').focus();
+  }
+  $('#newClientBtn').onclick = () => openClient(null);
+  $('#clientForm').addEventListener('submit', async e => {
+    e.preventDefault(); showErr('#clientError');
+    const body = { name: $('#kName').value.trim(), code: $('#kCode').value.trim(), entityType: $('#kType').value, ntn: $('#kNtn').value.trim(), strn: $('#kStrn').value.trim(),
+      cnic: $('#kCnic').value.trim(), contactPerson: $('#kContact').value.trim(), phone: $('#kPhone').value.trim(), email: $('#kEmail').value.trim(), notes: $('#kNotes').value.trim(),
+      staffIds: [...document.querySelectorAll('#kStaff input:checked')].map(i => Number(i.value)) };
+    if (state.me.role === 'owner') { body.managerId = $('#kMgr').value ? Number($('#kMgr').value) : null; if (editClient) body.active = $('#kActive').checked; }
+    const b = $('#clientSave'); b.disabled = true;
+    try {
+      const { client } = editClient ? await api('PATCH', '/api/clients/' + editClient.id, body) : await api('POST', '/api/clients', body);
+      state.clients = editClient ? state.clients.map(x => x.id === client.id ? client : x) : [...state.clients, client].sort((a, b) => a.name.localeCompare(b.name));
+      state.clientId = client.id; $('#clientDlg').close(); render(); toast(editClient ? 'Client updated' : client.name + ' added');
+    } catch (err) { showErr('#clientError', err.message); }
+    finally { b.disabled = false; }
   });
+
+  /* portal login dialog */
+  let portalCtx = null;
+  function openPortal(c, auth, l) {
+    portalCtx = { c, auth }; $('#portalForm').reset(); showErr('#portalError');
+    $('#portalTitle').textContent = auth + ' login'; $('#portalFor').textContent = c.name;
+    $('#pgId').value = l?.loginId || ''; $('#portalHint').hidden = !l; $('#pgClear').closest('label').hidden = !l; $('#pgDelete').hidden = !l;
+    $('#pgPass').placeholder = l?.hasPassword ? 'Saved — type to replace' : ''; $('#pgPin').placeholder = l?.hasPin ? 'Saved — type to replace' : '';
+    $('#loginDlg').showModal(); $('#pgId').focus();
+  }
+  $('#portalForm').addEventListener('submit', async e => {
+    e.preventDefault(); showErr('#portalError');
+    const clear = $('#pgClear').checked;
+    const body = { loginId: $('#pgId').value.trim(), password: clear ? '' : ($('#pgPass').value || null), pin: clear ? '' : ($('#pgPin').value || null) };
+    try {
+      const { client } = await api('PUT', `/api/clients/${portalCtx.c.id}/logins/${portalCtx.auth}`, body);
+      const old = revealed.get(portalCtx.c.id + ':' + portalCtx.auth); if (old) { clearTimeout(old.timer); revealed.delete(portalCtx.c.id + ':' + portalCtx.auth); }
+      state.clients = state.clients.map(x => x.id === client.id ? client : x); $('#loginDlg').close(); renderClientDetail(); toast(portalCtx.auth + ' login saved');
+    } catch (err) { showErr('#portalError', err.message); }
+  });
+  $('#pgDelete').onclick = async () => {
+    if ($('#pgDelete').dataset.armed !== '1') { $('#pgDelete').dataset.armed = '1'; $('#pgDelete').textContent = 'Click again to delete'; setTimeout(() => { $('#pgDelete').dataset.armed = ''; $('#pgDelete').textContent = 'Delete login'; }, 4000); return; }
+    try {
+      const { client } = await api('DELETE', `/api/clients/${portalCtx.c.id}/logins/${portalCtx.auth}`);
+      state.clients = state.clients.map(x => x.id === client.id ? client : x); $('#loginDlg').close(); renderClientDetail(); toast(portalCtx.auth + ' login deleted');
+    } catch (err) { showErr('#portalError', err.message); }
+    finally { $('#pgDelete').dataset.armed = ''; $('#pgDelete').textContent = 'Delete login'; }
+  };
+
+  /* ---------- recurring ---------- */
+  function schedule(r) {
+    const d = n => n + (n % 10 === 1 && n !== 11 ? 'st' : n % 10 === 2 && n !== 12 ? 'nd' : n % 10 === 3 && n !== 13 ? 'rd' : 'th');
+    if (r.frequency === 'monthly') return `Monthly · due ${d(r.dueDay)}`;
+    if (r.frequency === 'quarterly') return `Quarterly · due ${d(r.dueDay)} of ${r.months.map(m => MONTHS[m - 1].slice(0, 3)).join(', ')}`;
+    return `Yearly · due ${r.dueDay} ${MONTHS[(r.dueMonth || 1) - 1]}`;
+  }
+  function renderRules() {
+    const tb = $('#ruleTable tbody'); tb.replaceChildren();
+    if (!state.rules.length) { const tr = el('tr'); const td = el('td', 'empty-state', 'No recurring tasks yet. Add your monthly, quarterly and yearly returns here.'); td.colSpan = 6; tr.append(td); tb.append(tr); }
+    for (const r of state.rules) {
+      const tr = el('tr', r.active ? '' : 'paused');
+      const t = el('td'); t.append(el('b', null, r.title)); if (r.categoryName) t.append(el('small', null, r.categoryName)); tr.append(t);
+      tr.append(el('td', null, r.clientName || '—'));
+      tr.append(el('td', null, r.assigneeName));
+      const s = el('td', null, schedule(r)); s.append(el('small', null, `Added to board ${r.leadDays} day${r.leadDays === 1 ? '' : 's'} before`)); tr.append(s);
+      tr.append(el('td', null, r.active ? fmtDate(r.nextDue) || '—' : 'Paused'));
+      const a = el('td', 'acts');
+      if (r.canEdit) {
+        const key = 'rule:' + r.id;
+        if (state.confirm === key) a.append(el('span', null, 'Delete? Tasks already created stay. '), btn('Delete', 'ghost danger', () => delRule(r)), btn('Keep', 'ghost', () => { state.confirm = null; renderRules(); }));
+        else a.append(btn(r.active ? 'Pause' : 'Resume', 'ghost', () => saveRule(r, { active: !r.active }, r.active ? 'Paused' : 'Resumed')), btn('Edit', 'ghost', () => openRule(r)), btn('Delete', 'ghost danger', () => { state.confirm = key; renderRules(); }));
+      }
+      tr.append(a); tb.append(tr);
+    }
+    // categories (owner)
+    const chips = $('#catChips'); chips.replaceChildren();
+    for (const c of state.categories) { const ch = el('span', 'chip', c.name); const x = btn('×', '', () => delCat(c)); x.setAttribute('aria-label', 'Remove ' + c.name); ch.append(x); chips.append(ch); }
+  }
+  async function saveRule(r, patch, msg) {
+    try { const res = await api('PATCH', '/api/recurring/' + r.id, patch); state.rules = state.rules.map(x => x.id === r.id ? res.rule : x); if (res.created) await refresh(); else renderRules(); toast(msg); }
+    catch (err) { toast(err.message); }
+  }
+  async function delRule(r) {
+    state.confirm = null;
+    try { await api('DELETE', '/api/recurring/' + r.id); state.rules = state.rules.filter(x => x.id !== r.id); renderRules(); toast('Recurring task deleted'); }
+    catch (err) { toast(err.message); }
+  }
+  let editRule = null;
+  function syncFreq() {
+    const f = $('#rFreq').value;
+    $('#rMonthWrap').hidden = f !== 'annual'; $('#rMonthsWrap').hidden = f !== 'quarterly';
+    preview();
+  }
+  function preview() {
+    const f = $('#rFreq').value, day = Number($('#rDay').value) || 1, leadD = Number($('#rLead').value) || 0;
+    let txt = '';
+    if (f === 'monthly') txt = `Due on day ${day} every month. Covers the previous month (e.g. due ${day} Nov → return for October).`;
+    if (f === 'quarterly') { const ms = [...document.querySelectorAll('#rMonths input:checked')].map(i => MONTHS[Number(i.value) - 1].slice(0, 3)); txt = `Due on day ${day} of ${ms.join(', ') || '(choose months)'}. Covers the quarter that just ended.`; }
+    if (f === 'annual') txt = `Due ${day} ${MONTHS[Number($('#rMonth').value) - 1]} each year, labelled with the tax year.`;
+    $('#rPreview').textContent = txt + ` Appears on the task board ${leadD} day${leadD === 1 ? '' : 's'} before the due date.`;
+  }
+  function openRule(r) {
+    editRule = r || null; $('#ruleForm').reset(); showErr('#ruleError');
+    fillCats($('#rCat')); fillClients($('#rClient'), r?.clientId); fillPeople($('#rWho')); suggestPerson($('#rClient'), $('#rWho'));
+    const mSel = $('#rMonth'); mSel.replaceChildren(); MONTHS.forEach((m, i) => opt(mSel, i + 1, m));
+    const box = $('#rMonths'); box.replaceChildren();
+    MONTHS.forEach((m, i) => { const l = el('label'); const c = el('input'); c.type = 'checkbox'; c.value = i + 1; c.id = 'rm-' + (i + 1); c.onchange = preview; l.append(c, document.createTextNode(m.slice(0, 3))); box.append(l); });
+    const pre = $('#presets'); pre.replaceChildren(el('span', 'flabel', 'Quick start'));
+    for (const p of PRESETS) pre.append(btn(p.label, '', () => applyPreset(p)));
+    pre.hidden = !!r;
+    if (r) {
+      $('#rTitle').value = r.title; $('#rCat').value = r.categoryId ?? ''; $('#rClient').value = r.clientId ?? ''; $('#rWho').value = String(r.assigneeId);
+      $('#rFreq').value = r.frequency; $('#rDay').value = r.dueDay; $('#rMonth').value = r.dueMonth || 1; $('#rLead').value = r.leadDays; $('#rPri').value = r.priority; $('#rNotes').value = r.notes;
+      r.months.forEach(m => { const c = $('#rm-' + m); if (c) c.checked = true; });
+    } else { $('#rPri').value = 'high'; [1, 4, 7, 10].forEach(m => $('#rm-' + m).checked = true); }
+    $('#ruleDlgTitle').textContent = r ? 'Edit recurring task' : 'Add recurring task';
+    syncFreq(); $('#ruleDlg').showModal(); $('#rTitle').focus();
+  }
+  function applyPreset(p) {
+    $('#rTitle').value = p.title; $('#rFreq').value = p.frequency; $('#rDay').value = p.dueDay;
+    if (p.dueMonth) $('#rMonth').value = p.dueMonth;
+    document.querySelectorAll('#rMonths input').forEach(c => c.checked = (p.months || [1, 4, 7, 10]).includes(Number(c.value)));
+    const cat = state.categories.find(c => c.name.toLowerCase() === p.cat.toLowerCase()); if (cat) $('#rCat').value = cat.id;
+    syncFreq();
+  }
+  ['#rFreq'].forEach(s => $(s).addEventListener('change', syncFreq));
+  ['#rDay', '#rLead'].forEach(s => $(s).addEventListener('input', preview));
+  $('#rMonth').addEventListener('change', preview);
+  $('#newRuleBtn').onclick = () => openRule(null);
+  $('#ruleForm').addEventListener('submit', async e => {
+    e.preventDefault(); showErr('#ruleError');
+    const body = { title: $('#rTitle').value.trim(), categoryId: $('#rCat').value ? Number($('#rCat').value) : null, clientId: $('#rClient').value ? Number($('#rClient').value) : null,
+      assigneeId: Number($('#rWho').value), frequency: $('#rFreq').value, dueDay: Number($('#rDay').value), dueMonth: Number($('#rMonth').value),
+      months: [...document.querySelectorAll('#rMonths input:checked')].map(i => Number(i.value)), leadDays: Number($('#rLead').value), priority: $('#rPri').value, notes: $('#rNotes').value.trim() };
+    if (!body.assigneeId) return showErr('#ruleError', 'Choose who does this task.');
+    const b = $('#ruleSave'); b.disabled = true;
+    try {
+      const res = editRule ? await api('PATCH', '/api/recurring/' + editRule.id, body) : await api('POST', '/api/recurring', body);
+      $('#ruleDlg').close(); await refresh();
+      toast(res.created ? `Saved. ${res.created} task${res.created === 1 ? '' : 's'} added to the board.` : `Saved. Next one appears before ${fmtDate(res.rule.nextDue)}.`);
+    } catch (err) { showErr('#ruleError', err.message); }
+    finally { b.disabled = false; }
+  });
+  $('#catForm').addEventListener('submit', async e => {
+    e.preventDefault(); const name = $('#catName').value.trim(); if (!name) return;
+    try { const { category } = await api('POST', '/api/categories', { name }); state.categories = [...state.categories, category].sort((a, b) => a.name.localeCompare(b.name)); $('#catName').value = ''; render(); toast('Category added'); }
+    catch (err) { toast(err.message); }
+  });
+  async function delCat(c) {
+    try { await api('DELETE', '/api/categories/' + c.id); await refresh(); toast(c.name + ' removed'); } catch (err) { toast(err.message); }
+  }
 
   /* ---------- people ---------- */
   function openCount(id) { const mine = state.tasks.filter(t => t.assigneeId === id); return { open: mine.filter(t => t.status !== 'done').length, late: mine.filter(isLate).length }; }
   function personRow(u, tag) {
     const li = el('li');
     const wb = el('div', 'who-big'); wb.append(el('span', 'av lg', initials(u.name)));
-    const txt = el('div'); txt.append(el('b', null, u.name)); txt.append(el('small', null, [u.title, 'ID: ' + u.username].filter(Boolean).join(' · '))); wb.append(txt);
-    li.append(wb);
-    if (!u.active) li.append(el('span', 'tag off', 'Deactivated'));
-    else if (tag) li.append(el('span', 'tag', tag));
-    const c = openCount(u.id); li.append(el('span', 'load', `${c.open} open${c.late ? ` · ${c.late} overdue` : ''}`));
+    const txt = el('div'); txt.append(el('b', null, u.name), el('small', null, [u.title, 'ID: ' + u.username].filter(Boolean).join(' · '))); wb.append(txt); li.append(wb);
+    if (!u.active) li.append(el('span', 'tag off', 'Deactivated')); else if (tag) li.append(el('span', 'tag', tag));
+    const c = openCount(u.id); const nCl = state.clients.filter(x => x.active && (x.staffIds.includes(u.id) || x.managerId === u.id)).length;
+    li.append(el('span', 'load', `${c.open} open${c.late ? ` · ${c.late} overdue` : ''} · ${nCl} client${nCl === 1 ? '' : 's'}`));
     if (u.id === state.me.id) return li;
-    const mini = el('div', 'mini');
-    const key = 'user:' + u.id;
+    const mini = el('div', 'mini'); const key = 'user:' + u.id;
     if (state.confirm === key) {
-      mini.append(el('span', null, u.active ? 'Deactivate? They won\'t be able to sign in.' : 'Reactivate this account?'),
-        btn(u.active ? 'Deactivate' : 'Reactivate', 'ghost danger', () => setActive(u, !u.active)),
-        btn('Cancel', 'ghost', () => { state.confirm = null; renderPeople(); }));
+      mini.append(el('span', null, u.active ? 'Deactivate? They won\'t be able to sign in.' : 'Reactivate this account?'), btn(u.active ? 'Deactivate' : 'Reactivate', 'ghost danger', () => setActive(u, !u.active)), btn('Cancel', 'ghost', () => { state.confirm = null; renderPeople(); }));
       li.append(mini); return li;
     }
     if (state.me.role === 'owner' && u.role === 'staff' && u.active) {
       const mgrs = state.users.filter(x => x.role === 'manager' && x.active);
-      if (mgrs.length > 1) {
-        const s = el('select'); s.setAttribute('aria-label', 'Move ' + u.name + ' to another manager'); s.id = 'move-' + u.id;
-        for (const m of mgrs) { const o = el('option', null, 'Reports to ' + m.name); o.value = m.id; s.append(o); }
-        s.value = String(u.managerId); s.onchange = () => moveStaff(u, Number(s.value)); mini.append(s);
-      }
+      if (mgrs.length > 1) { const s = el('select'); s.id = 'move-' + u.id; s.setAttribute('aria-label', 'Move ' + u.name + ' to another manager'); for (const m of mgrs) opt(s, m.id, 'Reports to ' + m.name); s.value = String(u.managerId); s.onchange = () => moveStaff(u, Number(s.value)); mini.append(s); }
     }
     mini.append(btn('Reset password', 'ghost', () => openReset(u)), btn(u.active ? 'Deactivate' : 'Reactivate', 'ghost' + (u.active ? ' danger' : ''), () => { state.confirm = key; renderPeople(); }));
     li.append(mini); return li;
   }
   function renderPeople() {
     const host = $('#peopleList'); host.replaceChildren();
-    const me = state.me;
-    if (me.role === 'manager') {
-      const g = el('section', 'group');
-      const h = el('div', 'group-h'); h.append(el('h2', null, 'My staff')); g.append(h);
+    if (state.me.role === 'manager') {
+      const g = el('section', 'group'); const h = el('div', 'group-h'); h.append(el('h2', null, 'My staff')); g.append(h);
       const staff = state.users.filter(u => u.role === 'staff');
       if (!staff.length) g.append(el('p', 'empty-group', 'No staff yet. Use “Add staff member” to create their login.'));
-      const ul = el('ul', 'plist'); staff.forEach(s => ul.append(personRow(s))); g.append(ul);
-      host.append(g); return;
+      const ul = el('ul', 'plist'); staff.forEach(s => ul.append(personRow(s))); g.append(ul); host.append(g); return;
     }
     const managers = state.users.filter(u => u.role === 'manager');
     if (!managers.length) { const g = el('section', 'group'); g.append(el('p', 'empty-group', 'No managers yet. Start by adding a manager, then add the staff who report to them.')); host.append(g); }
     for (const m of managers) {
-      const g = el('section', 'group');
-      const ul = el('ul', 'plist');
+      const g = el('section', 'group'); const ul = el('ul', 'plist');
       const head = personRow(m, 'Manager'); head.classList.add('mgr'); ul.append(head);
-      const staff = state.users.filter(u => u.managerId === m.id);
-      staff.forEach(s => ul.append(personRow(s))); g.append(ul);
+      const staff = state.users.filter(u => u.managerId === m.id); staff.forEach(s => ul.append(personRow(s))); g.append(ul);
       if (!staff.length) g.append(el('p', 'empty-group', 'No staff report to ' + m.name + ' yet.'));
       host.append(g);
     }
@@ -320,18 +606,12 @@
     catch (err) { toast(err.message); }
     render();
   }
-
-  /* person dialog */
   function openPerson() {
     $('#personForm').reset(); showErr('#personError');
-    const owner = state.me.role === 'owner';
-    $('#roleRow').hidden = !owner;
-    const sel = $('#uMgr'); sel.replaceChildren();
-    for (const m of state.users.filter(u => u.role === 'manager' && u.active)) { const o = el('option', null, m.name); o.value = m.id; sel.append(o); }
-    $('#uRole').value = owner && !sel.options.length ? 'manager' : 'staff';
-    syncRole();
-    $('#uPass').value = tempPassword();
-    $('#personDlg').showModal(); $('#uName').focus();
+    const owner = state.me.role === 'owner'; $('#roleRow').hidden = !owner;
+    const sel = $('#uMgr'); sel.replaceChildren(); for (const m of state.users.filter(u => u.role === 'manager' && u.active)) opt(sel, m.id, m.name);
+    $('#uRole').value = owner && !sel.options.length ? 'manager' : 'staff'; syncRole();
+    $('#uPass').value = tempPassword(); $('#personDlg').showModal(); $('#uName').focus();
   }
   function syncRole() {
     const staff = $('#uRole').value === 'staff';
@@ -347,15 +627,10 @@
     if (role === 'staff' && state.me.role === 'owner' && !$('#uMgr').value) return showErr('#personError', 'Add a manager first, then add staff under them.');
     const body = { role, managerId: Number($('#uMgr').value) || undefined, name: $('#uName').value.trim(), title: $('#uTitle').value.trim(), username: $('#uLogin').value.trim(), password: $('#uPass').value };
     const b = $('#personSave'); b.disabled = true;
-    try {
-      const { user } = await api('POST', '/api/users', body);
-      state.users.push(user); $('#personDlg').close(); render();
-      toast(`${user.name} added. Login ID: ${user.username}`);
-    } catch (err) { showErr('#personError', err.message); }
+    try { const { user } = await api('POST', '/api/users', body); state.users.push(user); $('#personDlg').close(); render(); toast(`${user.name} added. Login ID: ${user.username}`); }
+    catch (err) { showErr('#personError', err.message); }
     finally { b.disabled = false; }
   });
-
-  /* reset dialog */
   let resetUser = null;
   function openReset(u) { resetUser = u; showErr('#resetError'); $('#resetFor').textContent = `${u.name} (login ID: ${u.username})`; $('#rPass').value = tempPassword(); $('#resetDlg').showModal(); $('#rPass').select(); }
   $('#resetForm').addEventListener('submit', async e => {
@@ -365,6 +640,5 @@
   });
 
   document.querySelectorAll('dialog [data-close]').forEach(b => b.onclick = () => b.closest('dialog').close());
-
   boot();
 })();

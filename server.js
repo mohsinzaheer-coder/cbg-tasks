@@ -1,13 +1,16 @@
 'use strict';
 /*
- * Corporate Brilliance Global — Employee Task Management
+ * Corporate Brilliance Global — Clients and Employee Tasks Management
  * Zero-dependency Node.js server (Node 22.13+): node:http, node:sqlite, node:crypto.
  *
  * Roles
- *   owner   — sees and manages everyone and every task
- *   manager — sees himself and his own staff; assigns tasks to them
- *   staff   — sees only tasks assigned to him; can update status and progress note
+ *   owner   — sees and manages everyone, every client and every task
+ *   manager — sees himself, his own staff, and the clients assigned to him or his staff
+ *   staff   — sees only his own tasks and the clients assigned to him
  * Every rule below is enforced here on the server, never only in the browser.
+ *
+ * Client portal passwords (FBR, PRA, SRB, KPRA, BRA, SECP) are encrypted with AES-256-GCM
+ * using a key derived from the CRED_KEY environment variable. Every reveal is logged.
  */
 const http = require('node:http');
 const fs = require('node:fs');
@@ -18,8 +21,11 @@ const { DatabaseSync } = require('node:sqlite');
 const PORT = Number(process.env.PORT) || 3000;
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'data', 'cbg.db');
 const PUBLIC_DIR = path.join(__dirname, 'public');
+const TZ = process.env.TZ_NAME || 'Asia/Karachi';
 const SESSION_DAYS = 7;
 const COOKIE = 'cbg_sid';
+const AUTHORITIES = ['FBR', 'PRA', 'SRB', 'KPRA', 'BRA', 'SECP'];
+const ENTITY_TYPES = ['Individual', 'AOP', 'Company', 'Other'];
 
 /* ------------------------------------------------------------------ DB */
 fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
@@ -60,7 +66,120 @@ CREATE TABLE IF NOT EXISTS sessions (
   user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   expires_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS categories (
+  id   INTEGER PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE COLLATE NOCASE
+);
+CREATE TABLE IF NOT EXISTS clients (
+  id             INTEGER PRIMARY KEY,
+  name           TEXT NOT NULL,
+  code           TEXT NOT NULL DEFAULT '',
+  entity_type    TEXT NOT NULL DEFAULT 'Company',
+  ntn            TEXT NOT NULL DEFAULT '',
+  strn           TEXT NOT NULL DEFAULT '',
+  cnic           TEXT NOT NULL DEFAULT '',
+  contact_person TEXT NOT NULL DEFAULT '',
+  phone          TEXT NOT NULL DEFAULT '',
+  email          TEXT NOT NULL DEFAULT '',
+  notes          TEXT NOT NULL DEFAULT '',
+  manager_id     INTEGER REFERENCES users(id),
+  active         INTEGER NOT NULL DEFAULT 1,
+  created_at     INTEGER NOT NULL,
+  updated_at     INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS client_staff (
+  client_id INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+  user_id   INTEGER NOT NULL REFERENCES users(id),
+  PRIMARY KEY (client_id, user_id)
+);
+CREATE TABLE IF NOT EXISTS client_logins (
+  client_id  INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+  authority  TEXT NOT NULL,
+  login_id   TEXT NOT NULL DEFAULT '',
+  secret_enc TEXT NOT NULL DEFAULT '',
+  pin_enc    TEXT NOT NULL DEFAULT '',
+  updated_at INTEGER NOT NULL,
+  updated_by INTEGER REFERENCES users(id),
+  PRIMARY KEY (client_id, authority)
+);
+CREATE TABLE IF NOT EXISTS secret_views (
+  id        INTEGER PRIMARY KEY,
+  client_id INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+  authority TEXT NOT NULL,
+  user_id   INTEGER NOT NULL REFERENCES users(id),
+  viewed_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS recurring (
+  id          INTEGER PRIMARY KEY,
+  title       TEXT NOT NULL,
+  category_id INTEGER REFERENCES categories(id) ON DELETE SET NULL,
+  client_id   INTEGER REFERENCES clients(id) ON DELETE SET NULL,
+  assignee_id INTEGER NOT NULL REFERENCES users(id),
+  frequency   TEXT NOT NULL CHECK (frequency IN ('monthly','quarterly','annual')),
+  due_day     INTEGER NOT NULL,
+  due_month   INTEGER,
+  months      TEXT NOT NULL DEFAULT '',
+  lead_days   INTEGER NOT NULL DEFAULT 10,
+  priority    TEXT NOT NULL DEFAULT 'high',
+  notes       TEXT NOT NULL DEFAULT '',
+  active      INTEGER NOT NULL DEFAULT 1,
+  last_due    TEXT NOT NULL DEFAULT '',
+  created_by  INTEGER NOT NULL REFERENCES users(id),
+  created_at  INTEGER NOT NULL
+);
 `);
+// Upgrade an existing tasks table from version 1 without losing data
+{
+  const cols = db.prepare('PRAGMA table_info(tasks)').all().map(c => c.name);
+  const add = (c, def) => { if (!cols.includes(c)) db.exec(`ALTER TABLE tasks ADD COLUMN ${c} ${def}`); };
+  add('category_id', 'INTEGER REFERENCES categories(id) ON DELETE SET NULL');
+  add('client_id', 'INTEGER REFERENCES clients(id) ON DELETE SET NULL');
+  add('recurring_id', 'INTEGER REFERENCES recurring(id) ON DELETE SET NULL');
+  add('period', "TEXT NOT NULL DEFAULT ''");
+  db.exec('CREATE INDEX IF NOT EXISTS tasks_client ON tasks(client_id)');
+}
+if (db.prepare('SELECT COUNT(*) n FROM categories').get().n === 0) {
+  const ins = db.prepare('INSERT INTO categories (name) VALUES (?)');
+  for (const c of ['Sales Tax', 'Withholding Tax', 'Income Tax', 'Annex H', 'Provincial Sales Tax', 'SECP / Corporate', 'Bookkeeping', 'Payroll', 'Audit', 'Other']) ins.run(c);
+}
+
+/* -------------------------------------------------------- local dates */
+function localToday() {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+}
+function addDays(ymd, n) { const d = new Date(ymd + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); }
+const pad = n => String(n).padStart(2, '0');
+const dim = (y, m) => new Date(Date.UTC(y, m, 0)).getUTCDate(); // m is 1-12
+const MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+/* ------------------------------------------------------- client secrets */
+const CRED_KEY = process.env.CRED_KEY ? crypto.scryptSync(process.env.CRED_KEY, 'cbg-client-logins-v1', 32) : null;
+(function checkKey() {
+  if (!CRED_KEY) { console.log('NOTE: CRED_KEY is not set. Saving client portal passwords is switched off.'); return; }
+  const fp = crypto.createHash('sha256').update(CRED_KEY).digest('hex').slice(0, 16);
+  const row = db.prepare("SELECT value FROM settings WHERE key = 'cred_key_fp'").get();
+  if (!row) db.prepare("INSERT INTO settings VALUES ('cred_key_fp', ?)").run(fp);
+  else if (row.value !== fp) console.error('WARNING: CRED_KEY differs from the one used to save client passwords. Saved passwords cannot be opened until the original CRED_KEY is restored.');
+})();
+function encrypt(text) {
+  if (!text) return '';
+  if (!CRED_KEY) throw new HttpError(503, 'Client passwords are switched off until CRED_KEY is set on the server.');
+  const iv = crypto.randomBytes(12);
+  const c = crypto.createCipheriv('aes-256-gcm', CRED_KEY, iv);
+  const ct = Buffer.concat([c.update(text, 'utf8'), c.final()]);
+  return ['v1', iv.toString('base64'), c.getAuthTag().toString('base64'), ct.toString('base64')].join(':');
+}
+function decrypt(blob) {
+  if (!blob) return '';
+  if (!CRED_KEY) throw new HttpError(503, 'Client passwords are switched off until CRED_KEY is set on the server.');
+  try {
+    const [, iv, tag, ct] = blob.split(':');
+    const d = crypto.createDecipheriv('aes-256-gcm', CRED_KEY, Buffer.from(iv, 'base64'));
+    d.setAuthTag(Buffer.from(tag, 'base64'));
+    return Buffer.concat([d.update(Buffer.from(ct, 'base64')), d.final()]).toString('utf8');
+  } catch { throw new HttpError(500, 'This password can\'t be opened. The server\'s CRED_KEY was changed.'); }
+}
 
 /* ------------------------------------------------------------ passwords */
 function hashPassword(pw) {
@@ -72,7 +191,7 @@ function verifyPassword(pw, stored) {
   const [alg, s, k] = String(stored).split('$');
   if (alg !== 'scrypt' || !s || !k) return false;
   const key = Buffer.from(k, 'base64');
-  const test = crypto.scryptSync(pw, Buffer.from(s, 'base64'), key.length, { N: 16384, r: 8, p: 1 });
+  const test = crypto.scryptSync(String(pw), Buffer.from(s, 'base64'), key.length, { N: 16384, r: 8, p: 1 });
   return crypto.timingSafeEqual(key, test);
 }
 const DUMMY_HASH = hashPassword(crypto.randomBytes(12).toString('hex'));
@@ -85,14 +204,11 @@ function passwordProblem(pw) {
 
 /* --------------------------------------------------------- first owner */
 (function seedOwner() {
-  const { n } = db.prepare('SELECT COUNT(*) n FROM users').get();
-  if (n > 0) return;
+  if (db.prepare('SELECT COUNT(*) n FROM users').get().n > 0) return;
   const username = (process.env.OWNER_USERNAME || 'owner').trim();
-  let password = process.env.OWNER_PASSWORD;
-  let generated = false;
+  let password = process.env.OWNER_PASSWORD; let generated = false;
   if (!password || passwordProblem(password)) { password = 'Cbg-' + crypto.randomBytes(6).toString('base64url') + '7'; generated = true; }
-  db.prepare(`INSERT INTO users (username,password_hash,name,title,role,must_change,created_at)
-              VALUES (?,?,?,?, 'owner', 1, ?)`)
+  db.prepare(`INSERT INTO users (username,password_hash,name,title,role,must_change,created_at) VALUES (?,?,?,?, 'owner', 1, ?)`)
     .run(username, hashPassword(password), process.env.OWNER_NAME || 'Owner', 'Owner', Date.now());
   console.log('\n=== Owner account created ===');
   console.log('Login ID :', username);
@@ -101,7 +217,7 @@ function passwordProblem(pw) {
 })();
 
 /* ------------------------------------------------------------- sessions */
-const sha = t => crypto.createHash('sha256').update(t).digest('hex');
+const sha = t => crypto.createHash('sha256').update(String(t)).digest('hex');
 function createSession(userId) {
   const token = crypto.randomBytes(32).toString('base64url');
   db.prepare('INSERT INTO sessions VALUES (?,?,?)').run(sha(token), userId, Date.now() + SESSION_DAYS * 864e5);
@@ -111,46 +227,33 @@ function parseCookies(req) {
   const out = {};
   for (const part of (req.headers.cookie || '').split(';')) {
     const i = part.indexOf('=');
-    if (i > 0) out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim());
+    if (i > 0) { try { out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim()); } catch { } }
   }
   return out;
 }
 function sessionUser(req) {
   const token = parseCookies(req)[COOKIE];
   if (!token) return null;
-  const row = db.prepare(`SELECT u.*, s.expires_at FROM sessions s JOIN users u ON u.id = s.user_id
-                          WHERE s.token_hash = ?`).get(sha(token));
+  const row = db.prepare('SELECT u.*, s.expires_at FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ?').get(sha(token));
   if (!row || row.expires_at < Date.now() || !row.active) return null;
   return row;
 }
-function isHttps(req) {
-  return process.env.COOKIE_SECURE === '1' || req.headers['x-forwarded-proto'] === 'https';
-}
+const isHttps = req => process.env.COOKIE_SECURE === '1' || req.headers['x-forwarded-proto'] === 'https';
 function setCookie(res, req, token, maxAge) {
   res.setHeader('Set-Cookie', `${COOKIE}=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAge}` + (isHttps(req) ? '; Secure' : ''));
 }
 setInterval(() => db.prepare('DELETE FROM sessions WHERE expires_at < ?').run(Date.now()), 3600e3).unref();
 
 /* ---------------------------------------------------- login rate limits */
-const attempts = new Map(); // key -> {count, until}
-function limited(key) { const a = attempts.get(key); return a && a.count >= 5 && a.until > Date.now(); }
-function fail(key) {
-  const a = attempts.get(key);
-  if (!a || a.until < Date.now()) attempts.set(key, { count: 1, until: Date.now() + 15 * 60e3 });
-  else a.count++;
-}
+const attempts = new Map();
+const limited = key => { const a = attempts.get(key); return a && a.count >= 5 && a.until > Date.now(); };
+function fail(key) { const a = attempts.get(key); if (!a || a.until < Date.now()) attempts.set(key, { count: 1, until: Date.now() + 15 * 60e3 }); else a.count++; }
 
 /* ---------------------------------------------------------- permissions */
-const publicUser = u => u && ({
-  id: u.id, username: u.username, name: u.name, title: u.title, role: u.role,
-  managerId: u.manager_id, active: !!u.active, mustChange: !!u.must_change,
-});
-// Ids of people whose tasks this user may see and assign to
+const publicUser = u => u && ({ id: u.id, username: u.username, name: u.name, title: u.title, role: u.role, managerId: u.manager_id, active: !!u.active, mustChange: !!u.must_change });
 function teamIds(me) {
-  if (me.role === 'owner') return null; // everyone
-  if (me.role === 'manager') {
-    return [me.id, ...db.prepare("SELECT id FROM users WHERE manager_id = ? AND role = 'staff'").all(me.id).map(r => r.id)];
-  }
+  if (me.role === 'owner') return null;
+  if (me.role === 'manager') return [me.id, ...db.prepare("SELECT id FROM users WHERE manager_id = ? AND role = 'staff'").all(me.id).map(r => r.id)];
   return [me.id];
 }
 function canManageUser(me, target) {
@@ -159,13 +262,25 @@ function canManageUser(me, target) {
   if (me.role === 'manager') return target.role === 'staff' && target.manager_id === me.id;
   return false;
 }
+// Clients this person may see: owner all; manager — his clients or clients of his staff; staff — clients assigned to him
+function visibleClientIds(me) {
+  if (me.role === 'owner') return null;
+  if (me.role === 'manager') {
+    const team = teamIds(me);
+    return db.prepare(`SELECT id FROM clients WHERE manager_id = ? UNION
+      SELECT client_id FROM client_staff WHERE user_id IN (${team.map(() => '?').join(',')})`).all(me.id, ...team).map(r => r.id ?? r.client_id);
+  }
+  return db.prepare('SELECT client_id id FROM client_staff WHERE user_id = ?').all(me.id).map(r => r.id);
+}
+function canSeeClient(me, c) { if (!c) return false; const ids = visibleClientIds(me); return ids === null || ids.includes(c.id); }
+function canEditClient(me, c) { return me.role === 'owner' || (me.role === 'manager' && c.manager_id === me.id); }
+
 function visibleTask(me, t) {
   if (!t) return false;
   if (me.role === 'owner') return true;
   if (me.role === 'manager') return teamIds(me).includes(t.assignee_id) || t.created_by === me.id;
   return t.assignee_id === me.id;
 }
-// Full edit/delete: owner always; manager for tasks on his staff or that he created (not ones assigned to him from above)
 function canEditTask(me, t) {
   if (me.role === 'owner') return true;
   if (me.role === 'manager') return t.created_by === me.id || (t.assignee_id !== me.id && teamIds(me).includes(t.assignee_id));
@@ -173,14 +288,16 @@ function canEditTask(me, t) {
 }
 function taskOut(t, me) {
   return {
-    id: t.id, title: t.title, notes: t.notes, priority: t.priority, due: t.due, status: t.status,
-    progress: t.progress, assigneeId: t.assignee_id, assigneeName: t.assignee_name, createdBy: t.created_by,
-    createdByName: t.creator_name, createdAt: t.created_at, updatedAt: t.updated_at, doneAt: t.done_at,
-    canEdit: canEditTask(me, t),
+    id: t.id, title: t.title, notes: t.notes, priority: t.priority, due: t.due, status: t.status, progress: t.progress,
+    assigneeId: t.assignee_id, assigneeName: t.assignee_name, createdBy: t.created_by, createdByName: t.creator_name,
+    categoryId: t.category_id, categoryName: t.category_name || '', clientId: t.client_id, clientName: t.client_name || '',
+    recurringId: t.recurring_id, period: t.period,
+    createdAt: t.created_at, updatedAt: t.updated_at, doneAt: t.done_at, canEdit: canEditTask(me, t),
   };
 }
-const TASK_SELECT = `SELECT t.*, a.name assignee_name, c.name creator_name FROM tasks t
-  JOIN users a ON a.id = t.assignee_id JOIN users c ON c.id = t.created_by`;
+const TASK_SELECT = `SELECT t.*, a.name assignee_name, c.name creator_name, k.name category_name, cl.name client_name FROM tasks t
+  JOIN users a ON a.id = t.assignee_id JOIN users c ON c.id = t.created_by
+  LEFT JOIN categories k ON k.id = t.category_id LEFT JOIN clients cl ON cl.id = t.client_id`;
 
 /* ------------------------------------------------------------- helpers */
 class HttpError extends Error { constructor(status, msg) { super(msg); this.status = status; } }
@@ -188,20 +305,19 @@ const bad = m => new HttpError(400, m);
 const str = (v, max, field) => {
   if (v == null) return '';
   if (typeof v !== 'string') throw bad(`${field} must be text.`);
-  v = v.trim();
-  if (v.length > max) throw bad(`${field} is too long (max ${max} characters).`);
+  v = v.trim(); if (v.length > max) throw bad(`${field} is too long (max ${max} characters).`);
   return v;
 };
 const isDate = v => v === '' || /^\d{4}-\d{2}-\d{2}$/.test(v);
+const intOrNull = v => (v === '' || v == null) ? null : Number.isInteger(Number(v)) ? Number(v) : NaN;
 function send(res, status, body) {
-  const data = JSON.stringify(body);
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
-  res.end(data);
+  res.end(JSON.stringify(body));
 }
 function readJson(req) {
   return new Promise((resolve, reject) => {
     let size = 0; const chunks = [];
-    req.on('data', c => { size += c.length; if (size > 64 * 1024) { reject(new HttpError(413, 'Request too large.')); req.destroy(); } else chunks.push(c); });
+    req.on('data', c => { size += c.length; if (size > 128 * 1024) { reject(new HttpError(413, 'Request too large.')); req.destroy(); } else chunks.push(c); });
     req.on('end', () => {
       if (!chunks.length) return resolve({});
       try { const v = JSON.parse(Buffer.concat(chunks).toString('utf8')); resolve(v && typeof v === 'object' && !Array.isArray(v) ? v : {}); }
@@ -210,11 +326,16 @@ function readJson(req) {
     req.on('error', reject);
   });
 }
+function tx(fn) { db.exec('BEGIN'); try { const r = fn(); db.exec('COMMIT'); return r; } catch (e) { db.exec('ROLLBACK'); throw e; } }
 
 /* --------------------------------------------------------------- routes */
 const routes = [];
-const route = (method, pattern, auth, fn) => routes.push({ method, re: new RegExp('^' + pattern.replace(/:(\w+)/g, '(?<$1>\\d+)') + '$'), auth, fn });
+const route = (method, pattern, auth, fn) => routes.push({
+  method, auth, fn,
+  re: new RegExp('^' + pattern.replace(/:auth\b/, '(?<auth>[A-Za-z]+)').replace(/:(\w+)/g, '(?<$1>\\d+)') + '$'),
+});
 
+/* ---- session ---- */
 route('POST', '/api/login', false, async (req, res, body) => {
   const username = str(body.username, 60, 'Login ID'); const password = typeof body.password === 'string' ? body.password : '';
   const ip = req.headers['x-forwarded-for']?.split(',')[0].trim() || req.socket.remoteAddress;
@@ -227,26 +348,22 @@ route('POST', '/api/login', false, async (req, res, body) => {
   setCookie(res, req, createSession(u.id), SESSION_DAYS * 86400);
   send(res, 200, { user: publicUser(u) });
 });
-
 route('POST', '/api/logout', false, async (req, res) => {
   const token = parseCookies(req)[COOKIE];
   if (token) db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(sha(token));
-  setCookie(res, req, '', 0);
-  send(res, 200, { ok: true });
+  setCookie(res, req, '', 0); send(res, 200, { ok: true });
 });
-
-route('GET', '/api/me', true, async (req, res, body, me) => send(res, 200, { user: publicUser(me) }));
-
+route('GET', '/api/me', true, async (req, res, body, me) => send(res, 200, { user: publicUser(me), config: { credsEnabled: !!CRED_KEY, authorities: AUTHORITIES, entityTypes: ENTITY_TYPES, today: localToday() } }));
 route('POST', '/api/me/password', true, async (req, res, body, me) => {
   if (!verifyPassword(String(body.current || ''), me.password_hash)) throw bad('Current password is incorrect.');
   const p = passwordProblem(body.next); if (p) throw bad(p);
   if (body.next === body.current) throw bad('Choose a password different from the current one.');
   db.prepare('UPDATE users SET password_hash = ?, must_change = 0 WHERE id = ?').run(hashPassword(body.next), me.id);
-  const keep = sha(parseCookies(req)[COOKIE]);
-  db.prepare('DELETE FROM sessions WHERE user_id = ? AND token_hash <> ?').run(me.id, keep); // sign out other devices
+  db.prepare('DELETE FROM sessions WHERE user_id = ? AND token_hash <> ?').run(me.id, sha(parseCookies(req)[COOKIE]));
   send(res, 200, { ok: true });
 });
 
+/* ---- people ---- */
 route('GET', '/api/users', true, async (req, res, body, me) => {
   let rows;
   if (me.role === 'owner') rows = db.prepare('SELECT * FROM users ORDER BY role, name').all();
@@ -254,11 +371,9 @@ route('GET', '/api/users', true, async (req, res, body, me) => {
   else rows = [me];
   send(res, 200, { users: rows.map(publicUser) });
 });
-
 route('POST', '/api/users', true, async (req, res, body, me) => {
   if (me.role === 'staff') throw new HttpError(403, 'Staff cannot add people.');
-  const name = str(body.name, 80, 'Name'); const username = str(body.username, 40, 'Login ID');
-  const title = str(body.title, 60, 'Job title');
+  const name = str(body.name, 80, 'Name'); const username = str(body.username, 40, 'Login ID'); const title = str(body.title, 60, 'Job title');
   const role = me.role === 'owner' ? body.role : 'staff';
   if (!name) throw bad('Enter a name.');
   if (!/^[A-Za-z0-9._-]{3,40}$/.test(username)) throw bad('Login ID must be 3–40 letters, numbers, dots, dashes or underscores.');
@@ -267,15 +382,13 @@ route('POST', '/api/users', true, async (req, res, body, me) => {
   let managerId = null;
   if (role === 'staff') {
     managerId = me.role === 'manager' ? me.id : Number(body.managerId);
-    const m = db.prepare("SELECT * FROM users WHERE id = ? AND role = 'manager' AND active = 1").get(managerId);
-    if (!m) throw bad('Choose the manager this staff member reports to.');
+    if (!db.prepare("SELECT 1 FROM users WHERE id = ? AND role = 'manager' AND active = 1").get(managerId)) throw bad('Choose the manager this staff member reports to.');
   }
   if (db.prepare('SELECT 1 FROM users WHERE username = ?').get(username)) throw bad('That login ID is already taken.');
-  const r = db.prepare(`INSERT INTO users (username,password_hash,name,title,role,manager_id,must_change,created_at)
-                        VALUES (?,?,?,?,?,?,1,?)`).run(username, hashPassword(body.password), name, title, role, managerId, Date.now());
+  const r = db.prepare('INSERT INTO users (username,password_hash,name,title,role,manager_id,must_change,created_at) VALUES (?,?,?,?,?,?,1,?)')
+    .run(username, hashPassword(body.password), name, title, role, managerId, Date.now());
   send(res, 201, { user: publicUser(db.prepare('SELECT * FROM users WHERE id = ?').get(r.lastInsertRowid)) });
 });
-
 route('PATCH', '/api/users/:id', true, async (req, res, body, me, params) => {
   const target = db.prepare('SELECT * FROM users WHERE id = ?').get(Number(params.id));
   if (!canManageUser(me, target) || (target.id === me.id && me.role !== 'owner')) throw new HttpError(404, 'Person not found.');
@@ -285,8 +398,7 @@ route('PATCH', '/api/users/:id', true, async (req, res, body, me, params) => {
   if ('password' in body) { const p = passwordProblem(body.password); if (p) throw bad(p); sets.password_hash = hashPassword(body.password); sets.must_change = 1; }
   if ('active' in body) {
     if (target.id === me.id) throw bad('You cannot deactivate your own account.');
-    if (target.role === 'manager' && !body.active &&
-        db.prepare("SELECT 1 FROM users WHERE manager_id = ? AND active = 1").get(target.id)) throw bad('Move this manager\'s staff to another manager first.');
+    if (target.role === 'manager' && !body.active && db.prepare('SELECT 1 FROM users WHERE manager_id = ? AND active = 1').get(target.id)) throw bad('Move this manager\'s staff to another manager first.');
     sets.active = body.active ? 1 : 0;
   }
   if ('managerId' in body) {
@@ -301,24 +413,161 @@ route('PATCH', '/api/users/:id', true, async (req, res, body, me, params) => {
   send(res, 200, { user: publicUser(db.prepare('SELECT * FROM users WHERE id = ?').get(target.id)) });
 });
 
+/* ---- categories ---- */
+route('GET', '/api/categories', true, async (req, res) => send(res, 200, { categories: db.prepare('SELECT id, name FROM categories ORDER BY name').all() }));
+route('POST', '/api/categories', true, async (req, res, body, me) => {
+  if (me.role !== 'owner') throw new HttpError(403, 'Only the owner can change categories.');
+  const name = str(body.name, 50, 'Category'); if (!name) throw bad('Enter a category name.');
+  if (db.prepare('SELECT 1 FROM categories WHERE name = ?').get(name)) throw bad('That category already exists.');
+  const r = db.prepare('INSERT INTO categories (name) VALUES (?)').run(name);
+  send(res, 201, { category: { id: Number(r.lastInsertRowid), name } });
+});
+route('DELETE', '/api/categories/:id', true, async (req, res, body, me, params) => {
+  if (me.role !== 'owner') throw new HttpError(403, 'Only the owner can change categories.');
+  db.prepare('UPDATE tasks SET category_id = NULL WHERE category_id = ?').run(Number(params.id));
+  db.prepare('UPDATE recurring SET category_id = NULL WHERE category_id = ?').run(Number(params.id));
+  db.prepare('DELETE FROM categories WHERE id = ?').run(Number(params.id));
+  send(res, 200, { ok: true });
+});
+
+/* ---- clients ---- */
+function clientOut(c, me) {
+  const staffIds = db.prepare('SELECT user_id FROM client_staff WHERE client_id = ?').all(c.id).map(r => r.user_id);
+  const logins = db.prepare('SELECT authority, login_id, secret_enc, pin_enc, updated_at FROM client_logins WHERE client_id = ?').all(c.id)
+    .map(l => ({ authority: l.authority, loginId: l.login_id, hasPassword: !!l.secret_enc, hasPin: !!l.pin_enc, updatedAt: l.updated_at }));
+  return {
+    id: c.id, name: c.name, code: c.code, entityType: c.entity_type, ntn: c.ntn, strn: c.strn, cnic: c.cnic,
+    contactPerson: c.contact_person, phone: c.phone, email: c.email, notes: c.notes, managerId: c.manager_id,
+    managerName: c.manager_name || '', active: !!c.active, staffIds, logins, canEdit: canEditClient(me, c),
+  };
+}
+const CLIENT_SELECT = 'SELECT c.*, m.name manager_name FROM clients c LEFT JOIN users m ON m.id = c.manager_id';
+function getClient(id) { return db.prepare(CLIENT_SELECT + ' WHERE c.id = ?').get(Number(id)); }
+
+route('GET', '/api/clients', true, async (req, res, body, me) => {
+  const ids = visibleClientIds(me);
+  const rows = ids === null ? db.prepare(CLIENT_SELECT + ' ORDER BY c.name').all()
+    : ids.length ? db.prepare(`${CLIENT_SELECT} WHERE c.id IN (${ids.map(() => '?').join(',')}) ORDER BY c.name`).all(...ids) : [];
+  send(res, 200, { clients: rows.map(c => clientOut(c, me)) });
+});
+
+function clientFields(body, me, existing) {
+  const f = {};
+  const map = { name: ['name', 120, 'Client name'], code: ['code', 30, 'Client code'], ntn: ['ntn', 30, 'NTN'], strn: ['strn', 30, 'STRN'], cnic: ['cnic', 20, 'CNIC'],
+    contactPerson: ['contact_person', 80, 'Contact person'], phone: ['phone', 40, 'Phone'], email: ['email', 120, 'Email'], notes: ['notes', 2000, 'Notes'] };
+  for (const [k, [col, max, label]] of Object.entries(map)) if (k in body) f[col] = str(body[k], max, label);
+  if ('name' in f && !f.name) throw bad('Enter the client name.');
+  if ('entityType' in body) { if (!ENTITY_TYPES.includes(body.entityType)) throw bad('Choose a client type.'); f.entity_type = body.entityType; }
+  if ('managerId' in body) {
+    if (me.role !== 'owner') { if (Number(body.managerId) !== me.id) throw new HttpError(403, 'Only the owner can assign clients to other managers.'); }
+    const mid = intOrNull(body.managerId);
+    if (mid !== null && !db.prepare("SELECT 1 FROM users WHERE id = ? AND role = 'manager' AND active = 1").get(mid)) throw bad('Choose an active manager.');
+    f.manager_id = mid;
+  }
+  if ('active' in body) { if (me.role !== 'owner') throw new HttpError(403, 'Only the owner can archive clients.'); f.active = body.active ? 1 : 0; }
+  return f;
+}
+function setClientStaff(me, clientId, managerId, staffIds) {
+  if (!Array.isArray(staffIds)) throw bad('Staff list is not valid.');
+  const ids = [...new Set(staffIds.map(Number))];
+  for (const id of ids) {
+    const u = db.prepare("SELECT * FROM users WHERE id = ? AND role = 'staff' AND active = 1").get(id);
+    if (!u) throw bad('One of the chosen staff members is not active.');
+    if (me.role === 'manager' && u.manager_id !== me.id) throw bad('You can only assign your own staff.');
+  }
+  db.prepare('DELETE FROM client_staff WHERE client_id = ?').run(clientId);
+  const ins = db.prepare('INSERT INTO client_staff VALUES (?,?)'); for (const id of ids) ins.run(clientId, id);
+}
+route('POST', '/api/clients', true, async (req, res, body, me) => {
+  if (me.role === 'staff') throw new HttpError(403, 'Staff cannot add clients.');
+  if (me.role === 'manager') body.managerId = me.id;
+  if (!('name' in body)) throw bad('Enter the client name.');
+  const f = clientFields(body, me, null);
+  const id = tx(() => {
+    const now = Date.now(); const cols = Object.keys(f);
+    const r = db.prepare(`INSERT INTO clients (${cols.join(',')}, created_at, updated_at) VALUES (${cols.map(() => '?').join(',')}, ?, ?)`).run(...cols.map(k => f[k]), now, now);
+    const cid = Number(r.lastInsertRowid);
+    if (body.staffIds) setClientStaff(me, cid, f.manager_id, body.staffIds);
+    return cid;
+  });
+  send(res, 201, { client: clientOut(getClient(id), me) });
+});
+route('PATCH', '/api/clients/:id', true, async (req, res, body, me, params) => {
+  const c = getClient(params.id);
+  if (!canSeeClient(me, c)) throw new HttpError(404, 'Client not found.');
+  if (!canEditClient(me, c)) throw new HttpError(403, 'You can view this client but not change it.');
+  const f = clientFields(body, me, c);
+  tx(() => {
+    const cols = Object.keys(f);
+    if (cols.length) db.prepare(`UPDATE clients SET ${cols.map(k => k + ' = ?').join(', ')}, updated_at = ? WHERE id = ?`).run(...cols.map(k => f[k]), Date.now(), c.id);
+    if ('staffIds' in body) {
+      // a manager editing keeps staff from other teams that the owner assigned
+      let keep = [];
+      if (me.role === 'manager') keep = db.prepare('SELECT cs.user_id FROM client_staff cs JOIN users u ON u.id = cs.user_id WHERE cs.client_id = ? AND u.manager_id <> ?').all(c.id, me.id).map(r => r.user_id);
+      setClientStaff(me, c.id, f.manager_id ?? c.manager_id, body.staffIds);
+      const ins = db.prepare('INSERT OR IGNORE INTO client_staff VALUES (?,?)'); for (const k of keep) ins.run(c.id, k);
+    }
+  });
+  send(res, 200, { client: clientOut(getClient(c.id), me) });
+});
+route('PUT', '/api/clients/:id/logins/:auth', true, async (req, res, body, me, params) => {
+  const c = getClient(params.id); const auth = String(params.auth).toUpperCase();
+  if (!canSeeClient(me, c)) throw new HttpError(404, 'Client not found.');
+  if (!canEditClient(me, c)) throw new HttpError(403, 'You can view this client\'s logins but not change them.');
+  if (!AUTHORITIES.includes(auth)) throw bad('Unknown portal.');
+  const loginId = str(body.loginId, 80, 'Login ID');
+  const cur = db.prepare('SELECT * FROM client_logins WHERE client_id = ? AND authority = ?').get(c.id, auth);
+  // null/undefined keeps the saved value; '' clears it
+  const secret = body.password == null ? (cur?.secret_enc || '') : encrypt(str(body.password, 200, 'Password'));
+  const pin = body.pin == null ? (cur?.pin_enc || '') : encrypt(str(body.pin, 50, 'PIN'));
+  db.prepare(`INSERT INTO client_logins (client_id, authority, login_id, secret_enc, pin_enc, updated_at, updated_by) VALUES (?,?,?,?,?,?,?)
+              ON CONFLICT(client_id, authority) DO UPDATE SET login_id=excluded.login_id, secret_enc=excluded.secret_enc, pin_enc=excluded.pin_enc, updated_at=excluded.updated_at, updated_by=excluded.updated_by`)
+    .run(c.id, auth, loginId, secret, pin, Date.now(), me.id);
+  send(res, 200, { client: clientOut(getClient(c.id), me) });
+});
+route('DELETE', '/api/clients/:id/logins/:auth', true, async (req, res, body, me, params) => {
+  const c = getClient(params.id);
+  if (!canSeeClient(me, c)) throw new HttpError(404, 'Client not found.');
+  if (!canEditClient(me, c)) throw new HttpError(403, 'You can view this client\'s logins but not change them.');
+  db.prepare('DELETE FROM client_logins WHERE client_id = ? AND authority = ?').run(c.id, String(params.auth).toUpperCase());
+  send(res, 200, { client: clientOut(getClient(c.id), me) });
+});
+route('POST', '/api/clients/:id/logins/:auth/reveal', true, async (req, res, body, me, params) => {
+  const c = getClient(params.id); const auth = String(params.auth).toUpperCase();
+  if (!canSeeClient(me, c)) throw new HttpError(404, 'Client not found.');
+  const l = db.prepare('SELECT * FROM client_logins WHERE client_id = ? AND authority = ?').get(c.id, auth);
+  if (!l) throw new HttpError(404, 'No login saved for this portal.');
+  const out = { loginId: l.login_id, password: decrypt(l.secret_enc), pin: decrypt(l.pin_enc) };
+  db.prepare('INSERT INTO secret_views (client_id, authority, user_id, viewed_at) VALUES (?,?,?,?)').run(c.id, auth, me.id, Date.now());
+  send(res, 200, out);
+});
+route('GET', '/api/clients/:id/access-log', true, async (req, res, body, me, params) => {
+  const c = getClient(params.id);
+  if (!canSeeClient(me, c) || !canEditClient(me, c)) throw new HttpError(404, 'Client not found.');
+  const rows = db.prepare(`SELECT v.authority, v.viewed_at, u.name FROM secret_views v JOIN users u ON u.id = v.user_id
+                           WHERE v.client_id = ? ORDER BY v.viewed_at DESC LIMIT 100`).all(c.id);
+  send(res, 200, { log: rows.map(r => ({ authority: r.authority, at: r.viewed_at, name: r.name })) });
+});
+
+/* ---- tasks ---- */
 route('GET', '/api/tasks', true, async (req, res, body, me) => {
   let rows;
   if (me.role === 'owner') rows = db.prepare(TASK_SELECT + ' ORDER BY t.created_at DESC').all();
   else {
     const ids = teamIds(me);
-    rows = db.prepare(`${TASK_SELECT} WHERE t.assignee_id IN (${ids.map(() => '?').join(',')})` +
-      (me.role === 'manager' ? ' OR t.created_by = ?' : '') + ' ORDER BY t.created_at DESC')
+    rows = db.prepare(`${TASK_SELECT} WHERE t.assignee_id IN (${ids.map(() => '?').join(',')})` + (me.role === 'manager' ? ' OR t.created_by = ?' : '') + ' ORDER BY t.created_at DESC')
       .all(...ids, ...(me.role === 'manager' ? [me.id] : []));
   }
   send(res, 200, { tasks: rows.map(t => taskOut(t, me)) });
 });
-
 function checkAssignee(me, id) {
   const a = db.prepare('SELECT * FROM users WHERE id = ? AND active = 1').get(Number(id));
   const team = teamIds(me);
   if (!a || (team && !team.includes(a.id))) throw bad('You can only assign tasks to your own team.');
   return a;
 }
+function checkCategory(v) { const id = intOrNull(v); if (id === null) return null; if (!db.prepare('SELECT 1 FROM categories WHERE id = ?').get(id)) throw bad('Choose a valid category.'); return id; }
+function checkClient(me, v) { const id = intOrNull(v); if (id === null) return null; const c = getClient(id); if (!canSeeClient(me, c) || !c.active) throw bad('Choose one of your clients.'); return id; }
 
 route('POST', '/api/tasks', true, async (req, res, body, me) => {
   if (me.role === 'staff') throw new HttpError(403, 'Staff cannot create tasks.');
@@ -327,18 +576,16 @@ route('POST', '/api/tasks', true, async (req, res, body, me) => {
   const priority = ['high', 'medium', 'low'].includes(body.priority) ? body.priority : 'medium';
   if (!isDate(due)) throw bad('Due date is not valid.');
   const a = checkAssignee(me, body.assigneeId);
+  const cat = checkCategory(body.categoryId); const cli = checkClient(me, body.clientId);
   const now = Date.now();
-  const r = db.prepare(`INSERT INTO tasks (title,notes,priority,due,assignee_id,created_by,created_at,updated_at,updated_by)
-                        VALUES (?,?,?,?,?,?,?,?,?)`).run(title, notes, priority, due, a.id, me.id, now, now, me.id);
+  const r = db.prepare(`INSERT INTO tasks (title,notes,priority,due,assignee_id,created_by,created_at,updated_at,updated_by,category_id,client_id)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?)`).run(title, notes, priority, due, a.id, me.id, now, now, me.id, cat, cli);
   send(res, 201, { task: taskOut(db.prepare(TASK_SELECT + ' WHERE t.id = ?').get(r.lastInsertRowid), me) });
 });
-
 route('PATCH', '/api/tasks/:id', true, async (req, res, body, me, params) => {
   const t = db.prepare(TASK_SELECT + ' WHERE t.id = ?').get(Number(params.id));
   if (!visibleTask(me, t)) throw new HttpError(404, 'Task not found.');
-  const full = canEditTask(me, t);
-  const sets = {};
-  // Anyone who can see a task assigned to them can update its status and progress note
+  const full = canEditTask(me, t); const sets = {};
   if ('status' in body) {
     if (!['todo', 'doing', 'done'].includes(body.status)) throw bad('Unknown status.');
     if (!full && t.assignee_id !== me.id) throw new HttpError(403, 'You can only update your own tasks.');
@@ -348,7 +595,7 @@ route('PATCH', '/api/tasks/:id', true, async (req, res, body, me, params) => {
     if (!full && t.assignee_id !== me.id) throw new HttpError(403, 'You can only update your own tasks.');
     sets.progress = str(body.progress, 1000, 'Progress note');
   }
-  for (const f of ['title', 'notes', 'priority', 'due', 'assigneeId']) {
+  for (const f of ['title', 'notes', 'priority', 'due', 'assigneeId', 'categoryId', 'clientId']) {
     if (!(f in body)) continue;
     if (!full) throw new HttpError(403, 'You can update status and progress only.');
     if (f === 'title') { const v = str(body.title, 160, 'Task'); if (!v) throw bad('Enter a task title.'); sets.title = v; }
@@ -356,6 +603,8 @@ route('PATCH', '/api/tasks/:id', true, async (req, res, body, me, params) => {
     if (f === 'priority') { if (!['high', 'medium', 'low'].includes(body.priority)) throw bad('Unknown priority.'); sets.priority = body.priority; }
     if (f === 'due') { const v = str(body.due, 10, 'Due date'); if (!isDate(v)) throw bad('Due date is not valid.'); sets.due = v; }
     if (f === 'assigneeId') sets.assignee_id = checkAssignee(me, body.assigneeId).id;
+    if (f === 'categoryId') sets.category_id = checkCategory(body.categoryId);
+    if (f === 'clientId') sets.client_id = (intOrNull(body.clientId) === t.client_id) ? t.client_id : checkClient(me, body.clientId);
   }
   const keys = Object.keys(sets);
   if (keys.length) {
@@ -364,7 +613,6 @@ route('PATCH', '/api/tasks/:id', true, async (req, res, body, me, params) => {
   }
   send(res, 200, { task: taskOut(db.prepare(TASK_SELECT + ' WHERE t.id = ?').get(t.id), me) });
 });
-
 route('DELETE', '/api/tasks/:id', true, async (req, res, body, me, params) => {
   const t = db.prepare('SELECT * FROM tasks WHERE id = ?').get(Number(params.id));
   if (!visibleTask(me, t)) throw new HttpError(404, 'Task not found.');
@@ -373,28 +621,147 @@ route('DELETE', '/api/tasks/:id', true, async (req, res, body, me, params) => {
   send(res, 200, { ok: true });
 });
 
+/* ---- recurring tasks ---- */
+// Every due date for a rule from `fromYmd` (exclusive) to `toYmd` (inclusive)
+function dueDates(r, fromYmd, toYmd) {
+  const out = []; const months = r.months ? r.months.split(',').map(Number) : [];
+  let y = Number(fromYmd.slice(0, 4)), m = Number(fromYmd.slice(5, 7));
+  const endY = Number(toYmd.slice(0, 4)), endM = Number(toYmd.slice(5, 7));
+  while (y < endY || (y === endY && m <= endM)) {
+    const hit = r.frequency === 'monthly' || (r.frequency === 'quarterly' && months.includes(m)) || (r.frequency === 'annual' && m === r.due_month);
+    if (hit) {
+      const due = `${y}-${pad(m)}-${pad(Math.min(r.due_day, dim(y, m)))}`;
+      if (due > fromYmd && due <= toYmd) out.push({ due, ...periodLabel(r, y, m) });
+    }
+    m++; if (m > 12) { m = 1; y++; }
+  }
+  return out;
+}
+// The period a return covers: the month or quarter before the due date; tax year for annual
+function periodLabel(r, y, m) {
+  if (r.frequency === 'monthly') { let py = y, pm = m - 1; if (pm < 1) { pm = 12; py--; } return { period: `${py}-${pad(pm)}`, label: `${MON[pm - 1]} ${py}` }; }
+  if (r.frequency === 'quarterly') {
+    let ey = y, em = m - 1; if (em < 1) { em = 12; ey--; }
+    let sy = ey, sm = em - 2; if (sm < 1) { sm += 12; sy--; }
+    return { period: `${ey}-Q${pad(em)}`, label: `${MON[sm - 1]}–${MON[em - 1]} ${ey}` };
+  }
+  const ty = m >= 7 ? y : y - 1;
+  return { period: `TY${ty}`, label: `Tax Year ${ty}` };
+}
+function generateRecurring(onlyId) {
+  const today = localToday(); let made = 0;
+  const rules = onlyId ? db.prepare('SELECT * FROM recurring WHERE id = ? AND active = 1').all(onlyId) : db.prepare('SELECT * FROM recurring WHERE active = 1').all();
+  for (const r of rules) {
+    const assignee = db.prepare('SELECT * FROM users WHERE id = ? AND active = 1').get(r.assignee_id);
+    if (!assignee) continue;
+    const client = r.client_id ? db.prepare('SELECT * FROM clients WHERE id = ?').get(r.client_id) : null;
+    if (client && !client.active) continue;
+    const from = r.last_due || addDays(today, -1);
+    const list = dueDates(r, from, addDays(today, r.lead_days));
+    if (!list.length) continue;
+    tx(() => {
+      for (const d of list) {
+        const title = [r.title, client?.name, d.label].filter(Boolean).join(' — ');
+        const now = Date.now();
+        db.prepare(`INSERT INTO tasks (title,notes,priority,due,assignee_id,created_by,created_at,updated_at,updated_by,category_id,client_id,recurring_id,period)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(title, r.notes, r.priority, d.due, r.assignee_id, r.created_by, now, now, r.created_by, r.category_id, r.client_id, r.id, d.period);
+        made++;
+      }
+      db.prepare('UPDATE recurring SET last_due = ? WHERE id = ?').run(list[list.length - 1].due, r.id);
+    });
+  }
+  return made;
+}
+function nextDue(r) { const t = localToday(); const n = dueDates(r, r.last_due && r.last_due > t ? r.last_due : addDays(t, -1), addDays(t, 400)); return n[0]?.due || ''; }
+function ruleOut(r, me) {
+  return {
+    id: r.id, title: r.title, categoryId: r.category_id, categoryName: r.category_name || '', clientId: r.client_id, clientName: r.client_name || '',
+    assigneeId: r.assignee_id, assigneeName: r.assignee_name, frequency: r.frequency, dueDay: r.due_day, dueMonth: r.due_month,
+    months: r.months ? r.months.split(',').map(Number) : [], leadDays: r.lead_days, priority: r.priority, notes: r.notes, active: !!r.active,
+    lastDue: r.last_due, nextDue: r.active ? nextDue(r) : '', createdBy: r.created_by, canEdit: canEditRule(me, r),
+  };
+}
+const RULE_SELECT = `SELECT r.*, k.name category_name, c.name client_name, a.name assignee_name FROM recurring r
+  LEFT JOIN categories k ON k.id = r.category_id LEFT JOIN clients c ON c.id = r.client_id JOIN users a ON a.id = r.assignee_id`;
+function canSeeRule(me, r) { if (me.role === 'owner') return true; if (me.role === 'manager') return r.created_by === me.id || teamIds(me).includes(r.assignee_id); return false; }
+function canEditRule(me, r) { if (me.role === 'owner') return true; return me.role === 'manager' && (r.created_by === me.id || (r.assignee_id !== me.id && teamIds(me).includes(r.assignee_id))); }
+function ruleFields(body, me, cur) {
+  const f = {};
+  if ('title' in body) { f.title = str(body.title, 120, 'Task name'); if (!f.title) throw bad('Enter the task name.'); }
+  if ('categoryId' in body) f.category_id = checkCategory(body.categoryId);
+  if ('clientId' in body) f.client_id = (cur && intOrNull(body.clientId) === cur.client_id) ? cur.client_id : checkClient(me, body.clientId);
+  if ('assigneeId' in body) f.assignee_id = checkAssignee(me, body.assigneeId).id;
+  if ('frequency' in body) { if (!['monthly', 'quarterly', 'annual'].includes(body.frequency)) throw bad('Choose how often it repeats.'); f.frequency = body.frequency; }
+  if ('dueDay' in body) { const d = Number(body.dueDay); if (!Number.isInteger(d) || d < 1 || d > 31) throw bad('Due day must be between 1 and 31.'); f.due_day = d; }
+  if ('dueMonth' in body) { const d = intOrNull(body.dueMonth); if (d !== null && (!Number.isInteger(d) || d < 1 || d > 12)) throw bad('Choose the due month.'); f.due_month = d; }
+  if ('months' in body) {
+    if (!Array.isArray(body.months)) throw bad('Choose the months.');
+    const ms = [...new Set(body.months.map(Number))].filter(x => x >= 1 && x <= 12).sort((a, b) => a - b); f.months = ms.join(',');
+  }
+  if ('leadDays' in body) { const d = Number(body.leadDays); if (!Number.isInteger(d) || d < 0 || d > 60) throw bad('Create-ahead days must be between 0 and 60.'); f.lead_days = d; }
+  if ('priority' in body) { if (!['high', 'medium', 'low'].includes(body.priority)) throw bad('Unknown priority.'); f.priority = body.priority; }
+  if ('notes' in body) f.notes = str(body.notes, 2000, 'Instructions');
+  if ('active' in body) f.active = body.active ? 1 : 0;
+  const freq = f.frequency ?? cur?.frequency;
+  if (freq === 'annual' && !(f.due_month ?? cur?.due_month)) throw bad('Choose the month the yearly task is due.');
+  if (freq === 'quarterly' && !(f.months ?? cur?.months)) throw bad('Choose the months the quarterly task is due.');
+  return f;
+}
+route('GET', '/api/recurring', true, async (req, res, body, me) => {
+  if (me.role === 'staff') return send(res, 200, { rules: [] });
+  const rows = db.prepare(RULE_SELECT + ' ORDER BY r.title').all().filter(r => canSeeRule(me, r));
+  send(res, 200, { rules: rows.map(r => ruleOut(r, me)) });
+});
+route('POST', '/api/recurring', true, async (req, res, body, me) => {
+  if (me.role === 'staff') throw new HttpError(403, 'Staff cannot set up recurring tasks.');
+  for (const k of ['title', 'assigneeId', 'frequency', 'dueDay']) if (!(k in body)) throw bad('Fill in the task name, person, frequency and due day.');
+  const f = ruleFields(body, me, null);
+  const cols = Object.keys(f);
+  const r = db.prepare(`INSERT INTO recurring (${cols.join(',')}, created_by, created_at) VALUES (${cols.map(() => '?').join(',')}, ?, ?)`).run(...cols.map(k => f[k]), me.id, Date.now());
+  const id = Number(r.lastInsertRowid);
+  const made = generateRecurring(id);
+  send(res, 201, { rule: ruleOut(db.prepare(RULE_SELECT + ' WHERE r.id = ?').get(id), me), created: made });
+});
+route('PATCH', '/api/recurring/:id', true, async (req, res, body, me, params) => {
+  const cur = db.prepare(RULE_SELECT + ' WHERE r.id = ?').get(Number(params.id));
+  if (!cur || !canSeeRule(me, cur)) throw new HttpError(404, 'Recurring task not found.');
+  if (!canEditRule(me, cur)) throw new HttpError(403, 'You cannot change this recurring task.');
+  const f = ruleFields(body, me, cur); const cols = Object.keys(f);
+  // Schedule changes start fresh from today so no past deadlines are back-filled
+  const sched = ['frequency', 'due_day', 'due_month', 'months'].some(k => k in f && String(f[k]) !== String(cur[k]));
+  if (sched || (f.active === 1 && !cur.active)) { f.last_due = cur.last_due > localToday() ? cur.last_due : ''; cols.push('last_due'); }
+  if (cols.length) db.prepare(`UPDATE recurring SET ${cols.map(k => k + ' = ?').join(', ')} WHERE id = ?`).run(...cols.map(k => f[k]), cur.id);
+  const made = generateRecurring(cur.id);
+  send(res, 200, { rule: ruleOut(db.prepare(RULE_SELECT + ' WHERE r.id = ?').get(cur.id), me), created: made });
+});
+route('DELETE', '/api/recurring/:id', true, async (req, res, body, me, params) => {
+  const cur = db.prepare('SELECT * FROM recurring WHERE id = ?').get(Number(params.id));
+  if (!cur || !canSeeRule(me, cur)) throw new HttpError(404, 'Recurring task not found.');
+  if (!canEditRule(me, cur)) throw new HttpError(403, 'You cannot delete this recurring task.');
+  db.prepare('UPDATE tasks SET recurring_id = NULL WHERE recurring_id = ?').run(cur.id);
+  db.prepare('DELETE FROM recurring WHERE id = ?').run(cur.id);
+  send(res, 200, { ok: true });
+});
+
 /* -------------------------------------------------------- static files */
 const TYPES = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon' };
 function serveStatic(req, res, urlPath) {
-  let p = decodeURIComponent(urlPath);
+  let p; try { p = decodeURIComponent(urlPath); } catch { res.writeHead(400); return res.end(); }
   if (p === '/' || !path.extname(p)) p = '/index.html';
   const file = path.normalize(path.join(PUBLIC_DIR, p));
   if (!file.startsWith(PUBLIC_DIR + path.sep)) { res.writeHead(404); return res.end(); }
   fs.readFile(file, (err, data) => {
     if (err) { res.writeHead(404, { 'Content-Type': 'text/plain' }); return res.end('Not found'); }
-    res.writeHead(200, { 'Content-Type': TYPES[path.extname(file)] || 'application/octet-stream', 'Cache-Control': p === '/index.html' ? 'no-cache' : 'public, max-age=3600' });
+    res.writeHead(200, { 'Content-Type': TYPES[path.extname(file)] || 'application/octet-stream', 'Cache-Control': ['.html', '.js', '.css'].includes(path.extname(file)) ? 'no-cache' : 'public, max-age=86400' });
     res.end(data);
   });
 }
 
 /* --------------------------------------------------------------- server */
 const SECURITY_HEADERS = {
-  'X-Content-Type-Options': 'nosniff',
-  'X-Frame-Options': 'DENY',
-  'Referrer-Policy': 'same-origin',
+  'X-Content-Type-Options': 'nosniff', 'X-Frame-Options': 'DENY', 'Referrer-Policy': 'same-origin',
   'Content-Security-Policy': "default-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; form-action 'self'; base-uri 'none'",
 };
-
 const server = http.createServer(async (req, res) => {
   for (const [k, v] of Object.entries(SECURITY_HEADERS)) res.setHeader(k, v);
   if (isHttps(req)) res.setHeader('Strict-Transport-Security', 'max-age=31536000');
@@ -404,7 +771,6 @@ const server = http.createServer(async (req, res) => {
     return serveStatic(req, res, url.pathname);
   }
   try {
-    // CSRF guard: state-changing calls must come from our own page (custom header + JSON)
     if (req.method !== 'GET' && req.headers['x-cbg'] !== '1') throw new HttpError(403, 'Request blocked.');
     const r = routes.find(r => r.method === req.method && r.re.test(url.pathname));
     if (!r) throw new HttpError(404, 'Not found.');
@@ -413,16 +779,17 @@ const server = http.createServer(async (req, res) => {
     if (r.auth) {
       me = sessionUser(req);
       if (!me) throw new HttpError(401, 'Please sign in.');
-      const passwordRoute = url.pathname === '/api/me/password' || url.pathname === '/api/me';
-      if (me.must_change && !passwordRoute) throw new HttpError(403, 'Choose a new password first.');
+      if (me.must_change && url.pathname !== '/api/me/password' && url.pathname !== '/api/me') throw new HttpError(403, 'Choose a new password first.');
     }
     const body = req.method === 'GET' ? {} : await readJson(req);
     await r.fn(req, res, body, me, params);
   } catch (e) {
     const status = e.status || 500;
-    if (status === 500) console.error(e);
-    send(res, status, { error: status === 500 ? 'Something went wrong on the server.' : e.message });
+    if (status === 500 && !(e instanceof HttpError)) console.error(e);
+    send(res, status, { error: status === 500 && !(e instanceof HttpError) ? 'Something went wrong on the server.' : e.message });
   }
 });
 
-server.listen(PORT, () => console.log(`Corporate Brilliance Global tasks running on http://localhost:${PORT}`));
+generateRecurring();
+setInterval(() => { try { generateRecurring(); } catch (e) { console.error('Recurring task generator:', e); } }, 3600e3).unref();
+server.listen(PORT, () => console.log(`Corporate Brilliance Global — Clients and Employee Tasks Management running on http://localhost:${PORT}`));
