@@ -86,12 +86,12 @@
     $('#meName').textContent = me.name; $('#meRole').textContent = ROLE[me.role] + (me.title && me.title !== ROLE[me.role] ? ' · ' + me.title : '');
     document.querySelectorAll('#tabs [data-role="assign"]').forEach(b => b.hidden = !lead());
     document.querySelectorAll('#tabs [data-role="mgmt"]').forEach(b => b.hidden = !mgmt());
-    $('#newTaskBtn').hidden = !lead(); $('#fPersonWrap').hidden = !lead(); $('#fPartnerWrap').hidden = !seesAll();
+    $('#newTaskBtn').hidden = false; $('#newTaskBtn').textContent = lead() ? '+ Assign task' : '+ Add my task'; $('#fPersonWrap').hidden = !lead(); $('#fPartnerWrap').hidden = !seesAll();
     $('#newClientBtn').hidden = !mgmt(); $('#cMgrWrap').hidden = !seesAll();
     $('#credsOff').hidden = !!state.config.credsEnabled;
     $('#tasksTitle').textContent = { staff: 'My tasks', manager: 'My team\'s tasks', partner: 'Tasks', owner: 'All tasks' }[me.role];
     $('#tasksSub').textContent = {
-      staff: 'Tasks assigned to you. Update the status as you go.',
+      staff: 'Your tasks. Update the status as you go, or add your own with “Add my task”.',
       manager: 'Tasks for you and the staff who report to you.',
       partner: 'Business tasks for you and your staff, tasks you assigned, and tasks you are involved in as a partner.',
       owner: 'Every business task across the firm. Personal tasks stay private to the person who added them.',
@@ -221,6 +221,7 @@
     if (t.clientName) tags.append(el('span', 'chip client', t.clientName));
     if (t.categoryName) tags.append(el('span', 'chip', t.categoryName));
     if (me.role === 'partner' && !mine && t.createdBy !== me.id && t.partnerIds.includes(me.id)) tags.append(el('span', 'chip watch', 'Following as partner'));
+    if (t.selfAdded && !mine && t.visibility !== 'personal') tags.append(el('span', 'chip watch', 'Self-added'));
     if (t.recurringId) tags.append(el('span', 'repeat', '↻ Recurring'));
     if (tags.children.length) c.append(tags);
     c.append(el('p', 'card-t', t.title));
@@ -242,7 +243,8 @@
     for (const [k] of STATUS) if (k !== t.status) a.append(btn(k === 'done' ? 'Mark done' : k === 'doing' ? 'Start' : 'Back to To do', 'ghost', () => patchTask(t, { status: k })));
     a.append(btn(t.progress ? 'Edit note' : 'Add note', 'ghost', () => openNote(t)));
     if (t.clientId && clientById(t.clientId)) a.append(btn('Client logins', 'ghost', () => { state.clientId = t.clientId; setTab('clients'); render(); }));
-    if (t.canEdit) a.append(btn('Edit', 'ghost', () => openTask(t)), btn('Delete', 'ghost danger', () => { state.confirm = key; renderBoards(); }));
+    if (t.canEdit) a.append(btn('Edit', 'ghost', () => openTask(t)));
+    if (t.canDelete) a.append(btn('Delete', 'ghost danger', () => { state.confirm = key; renderBoards(); }));
     c.append(a); return c;
   }
   async function patchTask(t, patch, msg) {
@@ -290,9 +292,10 @@
   let taskMode = 'assign';
   function syncTaskType() {
     const own = taskMode === 'own'; const personal = own && $('#tTypePer').checked;
-    $('#tTypeWrap').hidden = !own;
+    const staff = state.me.role === 'staff';
+    $('#tTypeWrap').hidden = !own || staff;
     $('#tWhoWrap').hidden = own; $('#tWho').required = !own;
-    $('#tPartnersWrap').hidden = personal;
+    $('#tPartnersWrap').hidden = personal || staff;
     const needs = own && !personal && state.me.role === 'manager';
     $('#tPartnersWrap').classList.toggle('required', needs);
     $('#tPartnersHelp').textContent = needs ? 'Business tasks you add for yourself must name at least one partner, who can then follow them.'
@@ -321,7 +324,7 @@
     if (taskMode === 'assign' && $('#tWho').options.length < 2) showErr('#taskError', 'Add people on the People tab first.');
     $('#taskDlg').showModal(); $('#tTitle').focus();
   }
-  $('#newTaskBtn').onclick = () => openTask(null, 'assign');
+  $('#newTaskBtn').onclick = () => openTask(null, lead() ? 'assign' : 'own');
   $('#newOwnBtn').onclick = () => openTask(null, 'own');
   $('#taskForm').addEventListener('submit', async e => {
     e.preventDefault(); showErr('#taskError');
@@ -330,7 +333,7 @@
       categoryId: $('#tCat').value ? Number($('#tCat').value) : null, clientId: $('#tClient').value ? Number($('#tClient').value) : null };
     if (own) { body.visibility = personal ? 'personal' : 'business'; if (!personal) body.assigneeId = state.me.id; }
     else body.assigneeId = Number($('#tWho').value);
-    if (!personal) body.partnerIds = checkedIds($('#tPartners'));
+    if (!personal && state.me.role !== 'staff') body.partnerIds = checkedIds($('#tPartners'));
     if (!own && !body.assigneeId) return showErr('#taskError', 'Choose who this task is for.');
     if (own && !personal && state.me.role === 'manager' && !body.partnerIds.length) return showErr('#taskError', 'Choose at least one partner who can follow this task.');
     const b = $('#taskSave'); b.disabled = true;
@@ -338,7 +341,7 @@
       if (state.editing) { const { task } = await api('PATCH', '/api/tasks/' + state.editing.id, body); state.tasks = state.tasks.map(x => x.id === task.id ? task : x); toast('Task updated'); }
       else {
         const { task } = await api('POST', '/api/tasks', body); state.tasks.unshift(task);
-        toast(personal ? 'Added to your feed. Only you can see it.' : own ? 'Added to your feed' : 'Assigned to ' + task.assigneeName);
+        toast(personal ? 'Added to your feed. Only you can see it.' : own ? (state.me.role === 'staff' ? 'Task added' : 'Added to your feed') : 'Assigned to ' + task.assigneeName);
       }
       $('#taskDlg').close(); render();
     } catch (err) { showErr('#taskError', err.message); }

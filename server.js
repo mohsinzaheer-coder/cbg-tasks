@@ -349,6 +349,7 @@ function taskOut(t, me, partners) {
     recurringId: t.recurring_id, period: t.period, visibility: t.visibility || 'business',
     partnerIds: ps.map(p => p.id), partnerNames: ps.map(p => p.name),
     createdAt: t.created_at, updatedAt: t.updated_at, doneAt: t.done_at, canEdit: canEditTask(me, t),
+    canDelete: canEditTask(me, t) && me.role !== 'staff', selfAdded: t.created_by === t.assignee_id,
   };
 }
 function checkPartners(list, excludeId) {
@@ -679,6 +680,7 @@ function checkAssignee(me, id) {
   const a = db.prepare('SELECT * FROM users WHERE id = ? AND active = 1 AND deleted = 0').get(Number(id));
   if (!a) throw bad('Choose who this task is for.');
   if (me.role === 'owner') return a;
+  if (me.role === 'staff') { if (a.id === me.id) return a; throw bad('You can only add tasks for yourself.'); }
   if (me.role === 'partner') { if (a.role === 'owner') throw bad('Partners can assign to partners and staff.'); return a; }
   if (me.role === 'manager' && teamIds(me).includes(a.id)) return a;
   throw bad('You can only assign tasks to your own team.');
@@ -689,7 +691,7 @@ function checkCategory(v) { const id = intOrNull(v); if (id === null) return nul
 function checkClient(me, v) { const id = intOrNull(v); if (id === null) return null; const c = getClient(id); if (!canSeeClient(me, c) || !c.active) throw bad('Choose one of your clients.'); return id; }
 
 route('POST', '/api/tasks', true, async (req, res, body, me) => {
-  if (me.role === 'staff') throw new HttpError(403, 'Staff cannot create tasks.');
+  // Staff may add business tasks for themselves only; the owner and their partner see them.
   const title = str(body.title, 160, 'Task'); if (!title) throw bad('Enter a task title.');
   const notes = str(body.notes, 2000, 'Notes'); const due = str(body.due, 10, 'Due date');
   const priority = ['high', 'medium', 'low'].includes(body.priority) ? body.priority : 'medium';
@@ -765,7 +767,7 @@ route('PATCH', '/api/tasks/:id', true, async (req, res, body, me, params) => {
 route('DELETE', '/api/tasks/:id', true, async (req, res, body, me, params) => {
   const t = db.prepare('SELECT * FROM tasks WHERE id = ?').get(Number(params.id));
   if (!visibleTask(me, t)) throw new HttpError(404, 'Task not found.');
-  if (!canEditTask(me, t)) throw new HttpError(403, 'You cannot delete this task.');
+  if (!canEditTask(me, t) || me.role === 'staff') throw new HttpError(403, 'You cannot delete this task. Ask your partner or the owner.');
   db.prepare('DELETE FROM tasks WHERE id = ?').run(t.id);
   send(res, 200, { ok: true });
 });
