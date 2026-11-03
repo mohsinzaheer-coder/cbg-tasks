@@ -265,7 +265,22 @@
 
   /* shared pickers */
   function fillPeople(sel) { sel.replaceChildren(); opt(sel, '', 'Choose a person'); addPeopleOptions(sel, false); }
-  function fillClients(sel, includeId) { sel.replaceChildren(); opt(sel, '', 'No client (internal)'); for (const c of state.clients.filter(c => c.active || c.id === includeId)) opt(sel, c.id, c.name + (c.code ? ` (${c.code})` : '')); }
+  function fillClients(sel, includeId) {
+    sel.replaceChildren(); opt(sel, '', 'No client (internal)');
+    for (const c of state.clients.filter(c => c.active || c.id === includeId)) opt(sel, c.id, c.name + (c.code ? ` (${c.code})` : ''));
+    if (mgmt()) opt(sel, '__new', '+ Add new client…'); // owner and partners can create a client without leaving the form
+    sel.dataset.prev = sel.value;
+  }
+  let afterClientSave = null;
+  function addClientFrom(sel, onPicked) {
+    sel.value = sel.dataset.prev || '';
+    afterClientSave = client => {
+      const keepFirst = sel.options[0].textContent;
+      fillClients(sel, client.id); sel.options[0].textContent = keepFirst;
+      sel.value = String(client.id); sel.dataset.prev = sel.value; onPicked && onPicked();
+    };
+    openClient(null);
+  }
   function fillCats(sel) { sel.replaceChildren(); opt(sel, '', 'No category'); for (const c of state.categories) opt(sel, c.id, c.name); }
   function fillPartnerChecks(box, selected) {
     box.replaceChildren();
@@ -282,6 +297,8 @@
   // When a client is chosen, pre-select a person who works on it
   function suggestPerson(clientSel, whoSel) {
     clientSel.onchange = () => {
+      if (clientSel.value === '__new') return addClientFrom(clientSel, () => clientSel.onchange());
+      clientSel.dataset.prev = clientSel.value;
       const c = clientById(Number(clientSel.value)); if (!c || whoSel.value) return;
       const pick = c.staffIds.find(id => userById(id)?.active) ?? (userById(c.managerId) ? c.managerId : null);
       if (pick != null && [...whoSel.options].some(o => o.value === String(pick))) whoSel.value = String(pick);
@@ -498,7 +515,8 @@
     try {
       const { client } = editClient ? await api('PATCH', '/api/clients/' + editClient.id, body) : await api('POST', '/api/clients', body);
       state.clients = editClient ? state.clients.map(x => x.id === client.id ? client : x) : [...state.clients, client].sort((a, b) => a.name.localeCompare(b.name));
-      state.clientId = client.id; $('#clientDlg').close(); render(); toast(editClient ? 'Client updated' : client.name + ' added');
+      state.clientId = client.id; const cb = afterClientSave; afterClientSave = null;
+      $('#clientDlg').close(); render(); if (cb) cb(client); toast(editClient ? 'Client updated' : client.name + ' added');
     } catch (err) { showErr('#clientError', err.message); }
     finally { b.disabled = false; }
   });
@@ -788,5 +806,7 @@
   });
 
   document.querySelectorAll('dialog [data-close]').forEach(b => b.onclick = () => b.closest('dialog').close());
+  $('#clientDlg').addEventListener('close', () => { afterClientSave = null; });
   boot();
 })();
+
