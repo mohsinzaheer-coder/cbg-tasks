@@ -296,6 +296,12 @@
     $('#tTypeWrap').hidden = !own || staff;
     $('#tWhoWrap').hidden = own; $('#tWho').required = !own;
     $('#tPartnersWrap').hidden = personal || staff;
+    // Category and client are compulsory when assigning, and for anything staff add
+    const req = !personal && (!own || staff || (state.editing && state.editing.createdBy !== state.me.id));
+    $('#tCatReq').hidden = !req; $('#tClientReq').hidden = !req;
+    $('#tCat').required = req; $('#tClient').required = req;
+    $('#tCat').options[0].textContent = req ? 'Choose a category' : 'No category';
+    $('#tClient').options[0].textContent = req ? 'Choose a client' : 'No client (internal)';
     const needs = own && !personal && state.me.role === 'manager';
     $('#tPartnersWrap').classList.toggle('required', needs);
     $('#tPartnersHelp').textContent = needs ? 'Business tasks you add for yourself must name at least one partner, who can then follow them.'
@@ -335,6 +341,8 @@
     else body.assigneeId = Number($('#tWho').value);
     if (!personal && state.me.role !== 'staff') body.partnerIds = checkedIds($('#tPartners'));
     if (!own && !body.assigneeId) return showErr('#taskError', 'Choose who this task is for.');
+    if ($('#tCat').required && !body.categoryId) return showErr('#taskError', 'Choose a task category.');
+    if ($('#tClient').required && !body.clientId) return showErr('#taskError', 'Choose a client.');
     if (own && !personal && state.me.role === 'manager' && !body.partnerIds.length) return showErr('#taskError', 'Choose at least one partner who can follow this task.');
     const b = $('#taskSave'); b.disabled = true;
     try {

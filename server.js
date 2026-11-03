@@ -686,6 +686,12 @@ function checkAssignee(me, id) {
   throw bad('You can only assign tasks to your own team.');
 }
 const canHavePersonal = me => ['owner', 'partner', 'manager'].includes(me.role);
+// Client and category are compulsory on work assigned to someone else, and on anything staff add
+const needsClientCat = (me, assigneeId, creatorId, visibility) => visibility === 'business' && (assigneeId !== creatorId || me.role === 'staff');
+function requireClientCat(cat, cli) {
+  if (cat == null) throw bad('Choose a task category.');
+  if (cli == null) throw bad('Choose a client.');
+}
 const NEED_PARTNER = 'Business tasks you add for yourself need at least one partner who can follow them.';
 function checkCategory(v) { const id = intOrNull(v); if (id === null) return null; if (!db.prepare('SELECT 1 FROM categories WHERE id = ?').get(id)) throw bad('Choose a valid category.'); return id; }
 function checkClient(me, v) { const id = intOrNull(v); if (id === null) return null; const c = getClient(id); if (!canSeeClient(me, c) || !c.active) throw bad('Choose one of your clients.'); return id; }
@@ -707,6 +713,7 @@ route('POST', '/api/tasks', true, async (req, res, body, me) => {
     if (me.role === 'manager' && a.id === me.id && !partners.length) throw bad(NEED_PARTNER);
   }
   const cat = checkCategory(body.categoryId); const cli = checkClient(me, body.clientId);
+  if (needsClientCat(me, a.id, me.id, visibility)) requireClientCat(cat, cli);
   const now = Date.now();
   const id = tx(() => {
     const r = db.prepare(`INSERT INTO tasks (title,notes,priority,due,assignee_id,created_by,created_at,updated_at,updated_by,category_id,client_id,visibility)
@@ -747,6 +754,9 @@ route('PATCH', '/api/tasks/:id', true, async (req, res, body, me, params) => {
     sets.visibility = body.visibility;
   }
   if ('partnerIds' in body && !full) throw new HttpError(403, 'You can update status and progress only.');
+  if (('categoryId' in body || 'clientId' in body || 'assigneeId' in body) &&
+      needsClientCat(me, sets.assignee_id ?? t.assignee_id, t.created_by, sets.visibility ?? t.visibility))
+    requireClientCat('category_id' in sets ? sets.category_id : t.category_id, 'client_id' in sets ? sets.client_id : t.client_id);
   const vis = sets.visibility ?? t.visibility, assignee = sets.assignee_id ?? t.assignee_id;
   let partners = 'partnerIds' in body ? checkPartners(body.partnerIds, null) : taskPartners(t.id).map(p => p.id);
   if (vis === 'personal') {

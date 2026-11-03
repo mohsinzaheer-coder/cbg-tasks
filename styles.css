@@ -228,3 +228,5 @@ button.primary.danger-btn{background:var(--late);border-color:var(--late);color:
 .partners-line{font-size:.85rem;color:var(--muted);margin:0}
 .partners-line b{color:var(--text);font-weight:600}
 .field.required .flabel::after{content:" (required)";color:var(--late);text-transform:none;letter-spacing:0;font-weight:600}
+
+em.req{font-style:normal;color:var(--late);text-transform:none;letter-spacing:0;font-weight:600}
