@@ -182,19 +182,110 @@
       return true;
     });
   }
-  function drawLanes(host, tasks, emptyText) {
-    host.replaceChildren();
-    for (const [key, label] of STATUS) {
-      const lane = el('section', 'lane'); lane.dataset.s = key;
-      const list = tasks.filter(t => t.status === key).sort(key === 'done' ? (a, b) => (b.doneAt || 0) - (a.doneAt || 0)
-        : (a, b) => (isLate(b) - isLate(a)) || (a.due || '9999').localeCompare(b.due || '9999') || (PRI[a.priority] - PRI[b.priority]));
-      const h = el('div', 'lane-h'); h.append(el('h3', null, label), el('span', null, String(list.length))); lane.append(h);
-      const shown = key === 'done' ? list.slice(0, 40) : list;
-      if (!list.length) lane.append(el('div', 'lane-empty', key === 'todo' && emptyText ? emptyText : 'Nothing here'));
-      for (const t of shown) lane.append(card(t));
-      if (list.length > shown.length) lane.append(el('div', 'lane-empty', `Showing the latest ${shown.length} of ${list.length} done tasks`));
-      host.append(lane);
+  /* Task lists: a table with status tabs (default), or the original three columns of cards */
+  let viewMode = 'table';
+  try { viewMode = localStorage.getItem('cbg-view') || 'table'; } catch { }
+  const statusTab = {};
+  const STATUS_LABEL = Object.fromEntries(STATUS);
+  function sortTasks(list, status) {
+    const rank = { todo: 0, doing: 1, done: 2 };
+    return list.slice().sort((a, b) =>
+      (status === 'all' ? rank[a.status] - rank[b.status] : 0) ||
+      (a.status === 'done' && b.status === 'done' ? (b.doneAt || 0) - (a.doneAt || 0) : 0) ||
+      (isLate(b) - isLate(a)) || (a.due || '9999').localeCompare(b.due || '9999') || (PRI[a.priority] - PRI[b.priority]));
+  }
+  function viewToggle() {
+    const v = el('div', 'view-toggle'); v.setAttribute('role', 'group'); v.setAttribute('aria-label', 'Layout');
+    for (const [k, label] of [['table', 'Table'], ['cards', 'Cards']]) {
+      const b = btn(label, viewMode === k ? 'on' : '', () => { viewMode = k; try { localStorage.setItem('cbg-view', k); } catch { } renderBoards(); });
+      b.setAttribute('aria-pressed', viewMode === k); v.append(b);
     }
+    return v;
+  }
+  function drawLanes(host, tasks, emptyText) {
+    host.className = 'task-host'; host.replaceChildren();
+    if (viewMode === 'cards') {
+      const bar = el('div', 'tt-bar'); bar.append(el('span'), viewToggle()); host.append(bar);
+      const grid = el('div', 'lanes');
+      for (const [key, label] of STATUS) {
+        const lane = el('section', 'lane'); lane.dataset.s = key;
+        const list = sortTasks(tasks.filter(t => t.status === key), key);
+        const h = el('div', 'lane-h'); h.append(el('h3', null, label), el('span', null, String(list.length))); lane.append(h);
+        const shown = key === 'done' ? list.slice(0, 40) : list;
+        if (!list.length) lane.append(el('div', 'lane-empty', key === 'todo' && emptyText ? emptyText : 'Nothing here'));
+        for (const t of shown) lane.append(card(t));
+        if (list.length > shown.length) lane.append(el('div', 'lane-empty', `Showing the latest ${shown.length} of ${list.length} done tasks`));
+        grid.append(lane);
+      }
+      host.append(grid); return;
+    }
+    const cur = statusTab[host.id] || 'todo';
+    const counts = { todo: 0, doing: 0, done: 0, all: tasks.length };
+    for (const t of tasks) counts[t.status]++;
+    const bar = el('div', 'tt-bar');
+    const tabs = el('div', 'status-tabs'); tabs.setAttribute('role', 'tablist');
+    for (const [key, label] of [...STATUS, ['all', 'All']]) {
+      const b = btn(label + ' ', 'st-tab' + (cur === key ? ' on' : '') + (key === 'done' ? ' is-done' : ''), () => { statusTab[host.id] = key; renderBoards(); });
+      b.setAttribute('role', 'tab'); b.setAttribute('aria-selected', cur === key);
+      b.append(el('span', 'st-count', String(counts[key]))); tabs.append(b);
+    }
+    bar.append(tabs, viewToggle()); host.append(bar);
+    let list = sortTasks(cur === 'all' ? tasks : tasks.filter(t => t.status === cur), cur);
+    const total = list.length;
+    if (cur === 'done' || cur === 'all') list = list.slice(0, 200);
+    if (!list.length) { host.append(el('div', 'lane-empty', !tasks.length && emptyText ? emptyText : `No ${cur === 'all' ? '' : STATUS_LABEL[cur].toLowerCase() + ' '}tasks here.`)); return; }
+    const wrap = el('div', 'table-wrap'); const table = el('table', 'table tasks-table');
+    const thead = el('thead'); const hr = el('tr');
+    for (const h of ['Task', 'Client', 'Category', 'Assigned to', 'Partners', 'Priority', 'Due', 'Status', '']) hr.append(el('th', null, h));
+    thead.append(hr); table.append(thead);
+    const tb = el('tbody'); for (const t of list) tb.append(taskRow(t)); table.append(tb);
+    wrap.append(table); host.append(wrap);
+    if (total > list.length) host.append(el('p', 'help', `Showing ${list.length} of ${total}. Use the filters or search to narrow it down.`));
+  }
+  function taskRow(t) {
+    const me = state.me; const mine = t.assigneeId === me.id; const late = isLate(t);
+    const tr = el('tr', late ? 'late-row' : t.status === 'done' ? 'done-row' : '');
+    // Task
+    const td = el('td', 'tt-task');
+    td.append(el('b', null, t.title));
+    const tags = el('div', 'tt-tags');
+    if (t.visibility === 'personal') tags.append(el('span', 'chip personal', 'Personal'));
+    if (t.selfAdded && !mine && t.visibility !== 'personal') tags.append(el('span', 'chip watch', 'Self-added'));
+    if (me.role === 'partner' && !mine && t.createdBy !== me.id && t.partnerIds.includes(me.id)) tags.append(el('span', 'chip watch', 'Following'));
+    if (t.recurringId) tags.append(el('span', 'repeat', '↻ Recurring'));
+    if (tags.children.length) td.append(tags);
+    if (t.notes) td.append(el('small', 'tt-notes', t.notes));
+    if (t.progress) { const p = el('small', 'tt-progress'); p.append(el('b', null, 'Progress: '), document.createTextNode(t.progress)); td.append(p); }
+    tr.append(td);
+    tr.append(el('td', null, t.clientName || '—'));
+    tr.append(el('td', null, t.categoryName || '—'));
+    const who = el('td'); who.append(document.createTextNode(mine ? 'Me' : t.assigneeName));
+    if (t.createdBy !== me.id && !t.recurringId) who.append(el('small', null, 'From ' + t.createdByName));
+    tr.append(who);
+    tr.append(el('td', 'tt-partners', t.partnerNames.join(', ') || '—'));
+    const pr = el('td'); pr.append(el('span', 'pill p-' + t.priority, t.priority)); tr.append(pr);
+    const due = el('td', 'tt-due' + (late ? ' late' : ''), t.due ? fmtDate(t.due) : '—'); if (late) due.append(el('small', null, 'Overdue')); tr.append(due);
+    // Status
+    const st = el('td');
+    if (mine || t.canEdit) {
+      const sel = el('select', 'st-select st-' + t.status); sel.id = 'st-' + t.id; sel.setAttribute('aria-label', 'Status of ' + t.title);
+      for (const [k, label] of STATUS) opt(sel, k, label);
+      sel.value = t.status; sel.onchange = () => patchTask(t, { status: sel.value });
+      st.append(sel);
+    } else st.append(el('span', 'st-pill st-' + t.status, STATUS_LABEL[t.status]));
+    tr.append(st);
+    // Actions
+    const ac = el('td', 'acts'); const key = 'task:' + t.id;
+    if (state.confirm === key) {
+      ac.append(el('span', null, 'Delete? '), btn('Delete', 'ghost danger', () => delTask(t)), btn('Keep', 'ghost', () => { state.confirm = null; renderBoards(); }));
+    } else {
+      if (mine || t.canEdit) ac.append(btn(t.progress ? 'Note' : 'Add note', 'ghost', () => openNote(t)));
+      if (t.clientId && clientById(t.clientId)) ac.append(btn('Logins', 'ghost', () => { state.clientId = t.clientId; setTab('clients'); render(); }));
+      if (t.canEdit) ac.append(btn('Edit', 'ghost', () => openTask(t)));
+      if (t.canDelete) ac.append(btn('Delete', 'ghost danger', () => { state.confirm = key; renderBoards(); }));
+    }
+    tr.append(ac);
+    return tr;
   }
   function renderTasks() {
     const tasks = filteredTasks();

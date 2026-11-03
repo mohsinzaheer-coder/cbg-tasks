@@ -230,3 +230,40 @@ button.primary.danger-btn{background:var(--late);border-color:var(--late);color:
 .field.required .flabel::after{content:" (required)";color:var(--late);text-transform:none;letter-spacing:0;font-weight:600}
 
 em.req{font-style:normal;color:var(--late);text-transform:none;letter-spacing:0;font-weight:600}
+
+/* task table */
+.task-host{display:flex;flex-direction:column;gap:12px;min-width:0}
+.tt-bar{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:10px}
+.status-tabs{display:flex;flex-wrap:wrap;gap:4px;background:var(--sunk);border-radius:10px;padding:4px}
+.st-tab{border:0;background:transparent;color:var(--muted);padding:8px 14px;border-radius:7px;display:inline-flex;align-items:center;gap:8px}
+.st-tab:hover{color:var(--text)}
+.st-tab.on{background:var(--surface);color:var(--ink);box-shadow:0 1px 2px rgba(0,0,0,.08)}
+.st-count{font-size:.78rem;font-variant-numeric:tabular-nums;background:var(--sunk);border-radius:99px;padding:1px 8px;color:var(--text)}
+.st-tab.on .st-count{background:var(--gold-soft)}
+.view-toggle{display:flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.view-toggle button{border:0;border-radius:0;padding:6px 12px;font-size:.88rem;color:var(--muted);background:var(--surface)}
+.view-toggle button.on{background:var(--ink);color:var(--bg)}
+.tasks-table{min-width:1080px}
+.tasks-table td{font-size:.93rem}
+.tasks-table td small{display:block;color:var(--muted);font-size:.8rem;margin-top:2px}
+.tt-task{min-width:260px;max-width:380px}
+.tt-task b{display:block;color:var(--ink);font-weight:600;overflow-wrap:anywhere}
+.tt-tags{display:flex;flex-wrap:wrap;gap:4px;margin-top:4px}
+.tasks-table td small.tt-notes{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;white-space:pre-wrap}
+.tasks-table td small.tt-progress{color:var(--text);background:var(--gold-soft);border-radius:5px;padding:3px 7px;margin-top:5px}
+.tt-partners{max-width:170px}
+.tt-due{white-space:nowrap;font-variant-numeric:tabular-nums}
+.tt-due.late{color:var(--late);font-weight:600}
+.tt-due.late small{color:var(--late)}
+.tasks-table tr.late-row td:first-child{box-shadow:inset 3px 0 0 var(--late)}
+.tasks-table tr.done-row .tt-task b{text-decoration:line-through;color:var(--muted)}
+.tasks-table tbody tr:hover td{background:var(--bg)}
+.st-select{width:auto;padding:5px 8px;font-size:.88rem;font-weight:600;border-radius:99px}
+.st-select.st-doing,.st-pill.st-doing{background:var(--gold-soft);border-color:var(--gold)}
+.st-select.st-done,.st-pill.st-done{background:var(--low-soft);color:var(--good);border-color:var(--good)}
+.st-pill{display:inline-block;border:1px solid var(--line);border-radius:99px;padding:3px 10px;font-size:.85rem;font-weight:600;white-space:nowrap}
+.tasks-table .acts{white-space:nowrap;text-align:right}
+.tasks-table .acts button{font-size:.85rem;padding:4px 7px}
+.tasks-table td:nth-child(2){min-width:150px}
+.tasks-table td:nth-child(3){min-width:120px}
+.tasks-table td:nth-child(4){min-width:120px}
