@@ -1,6 +1,6 @@
 {
   "name": "cbg-task-management",
-  "version": "2.7.0",
+  "version": "2.7.3",
   "description": "Corporate Brilliance Global — Clients and Employee Tasks Management (Owner, Managers, Staff)",
   "main": "server.js",
   "private": true,

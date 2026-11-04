@@ -337,6 +337,7 @@ function visibleTask(me, t, partners) {
 function canEditTask(me, t) {
   if (t.visibility === 'personal') return t.created_by === me.id;
   if (me.role === 'owner' || t.created_by === me.id) return true;
+  if (me.role === 'partner' && t.assignee_id === me.id) return true; // a partner can pass work given to him on to his staff
   if (me.role === 'partner') return t.assignee_id !== me.id && teamIds(me).includes(t.assignee_id);
   return false;
 }
@@ -349,8 +350,15 @@ function taskOut(t, me, partners) {
     recurringId: t.recurring_id, period: t.period, visibility: t.visibility || 'business',
     partnerIds: ps.map(p => p.id), partnerNames: ps.map(p => p.name),
     createdAt: t.created_at, updatedAt: t.updated_at, doneAt: t.done_at, canEdit: canEditTask(me, t),
-    canDelete: canEditTask(me, t) && me.role !== 'staff', selfAdded: t.created_by === t.assignee_id,
+    canDelete: canDeleteTask(me, t), selfAdded: t.created_by === t.assignee_id,
   };
+}
+// Deleting stays with the owner, the person who created the task, and the partner over the assignee
+function canDeleteTask(me, t) {
+  if (me.role === 'staff') return false;
+  if (t.visibility === 'personal') return t.created_by === me.id;
+  if (me.role === 'owner' || t.created_by === me.id) return true;
+  return me.role === 'partner' && t.assignee_id !== me.id && teamIds(me).includes(t.assignee_id);
 }
 function checkPartners(list, excludeId) {
   if (list == null) return [];
@@ -770,14 +778,15 @@ route('PATCH', '/api/tasks/:id', true, async (req, res, body, me, params) => {
       sets.updated_at = Date.now(); sets.updated_by = me.id; keys.push('updated_at', 'updated_by');
       db.prepare(`UPDATE tasks SET ${keys.map(k => k + ' = ?').join(', ')} WHERE id = ?`).run(...keys.map(k => sets[k]), t.id);
     }
-    if ('partnerIds' in body || vis === 'personal') setTaskPartners(t.id, partners);
+    if (me.role === 'partner' && t.assignee_id === me.id && assignee !== me.id && vis === 'business' && !partners.includes(me.id)) partners.push(me.id);
+    if ('partnerIds' in body || vis === 'personal' || assignee !== t.assignee_id) setTaskPartners(t.id, partners);
   });
   send(res, 200, { task: taskOut(db.prepare(TASK_SELECT + ' WHERE t.id = ?').get(t.id), me) });
 });
 route('DELETE', '/api/tasks/:id', true, async (req, res, body, me, params) => {
   const t = db.prepare('SELECT * FROM tasks WHERE id = ?').get(Number(params.id));
   if (!visibleTask(me, t)) throw new HttpError(404, 'Task not found.');
-  if (!canEditTask(me, t) || me.role === 'staff') throw new HttpError(403, 'You cannot delete this task. Ask your partner or the owner.');
+  if (!canDeleteTask(me, t)) throw new HttpError(403, 'You cannot delete this task. Ask the person who assigned it or the owner.');
   db.prepare('DELETE FROM tasks WHERE id = ?').run(t.id);
   send(res, 200, { ok: true });
 });

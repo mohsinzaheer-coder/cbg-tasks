@@ -186,7 +186,9 @@
   let viewMode = 'table';
   try { viewMode = localStorage.getItem('cbg-view') || 'table'; } catch { }
   const statusTab = {};
-  const STATUS_LABEL = Object.fromEntries(STATUS);
+  const STATUS_LABEL = { ...Object.fromEntries(STATUS), open: 'Open', overdue: 'Overdue', all: 'All' };
+  // Which tasks a status key covers: the three statuses, plus 'open' (not done), 'overdue' and 'all'
+  const inStatus = (t, k) => k === 'all' ? true : k === 'open' ? t.status !== 'done' : k === 'overdue' ? isLate(t) : t.status === k;
   function sortTasks(list, status) {
     const rank = { todo: 0, doing: 1, done: 2 };
     return list.slice().sort((a, b) =>
@@ -204,7 +206,9 @@
   }
   function drawLanes(host, tasks, emptyText) {
     host.className = 'task-host'; host.replaceChildren();
+    const cur = statusTab[host.id] || 'all';
     if (viewMode === 'cards') {
+      if (!['todo', 'all'].includes(cur)) tasks = tasks.filter(t => inStatus(t, cur));
       const bar = el('div', 'tt-bar'); bar.append(el('span'), viewToggle()); host.append(bar);
       const grid = el('div', 'lanes');
       for (const [key, label] of STATUS) {
@@ -219,7 +223,6 @@
       }
       host.append(grid); return;
     }
-    const cur = statusTab[host.id] || 'todo';
     const counts = { todo: 0, doing: 0, done: 0, all: tasks.length };
     for (const t of tasks) counts[t.status]++;
     const bar = el('div', 'tt-bar');
@@ -230,7 +233,11 @@
       b.append(el('span', 'st-count', String(counts[key]))); tabs.append(b);
     }
     bar.append(tabs, viewToggle()); host.append(bar);
-    let list = sortTasks(cur === 'all' ? tasks : tasks.filter(t => t.status === cur), cur);
+    if (cur === 'open' || cur === 'overdue') {
+      const note = el('span', 'filter-note'); note.append(document.createTextNode('Showing ' + STATUS_LABEL[cur].toLowerCase() + ' tasks '));
+      note.append(btn('Show all', 'link', () => { statusTab[host.id] = 'all'; renderBoards(); })); bar.insertBefore(note, bar.lastChild);
+    }
+    let list = sortTasks(tasks.filter(t => inStatus(t, cur)), cur === 'open' || cur === 'overdue' ? 'all' : cur);
     const total = list.length;
     if (cur === 'done' || cur === 'all') list = list.slice(0, 200);
     if (!list.length) { host.append(el('div', 'lane-empty', !tasks.length && emptyText ? emptyText : `No ${cur === 'all' ? '' : STATUS_LABEL[cur].toLowerCase() + ' '}tasks here.`)); return; }
@@ -293,6 +300,8 @@
     $('#sDoing').textContent = tasks.filter(t => t.status === 'doing').length;
     $('#sLate').textContent = tasks.filter(isLate).length;
     $('#sDone').textContent = tasks.filter(t => t.status === 'done').length;
+    const cur = statusTab.lanes || 'all';
+    document.querySelectorAll('#tasksPage .stat').forEach(b => { const on = b.dataset.stat === cur; b.classList.toggle('on', on); b.setAttribute('aria-pressed', on); });
     const none = !state.tasks.some(t => t.visibility !== 'personal');
     drawLanes($('#lanes'), tasks, none ? (lead() ? 'No tasks yet. Use “Assign task” to give someone work.' : 'No tasks assigned to you yet.') : null);
   }
@@ -351,6 +360,10 @@
     try { await api('DELETE', '/api/tasks/' + t.id); state.tasks = state.tasks.filter(x => x.id !== t.id); render(); toast('Task deleted'); }
     catch (err) { toast(err.message); renderBoards(); }
   }
+  // The four boxes filter the list below; clicking the selected one again shows everything
+  document.querySelectorAll('#tasksPage .stat').forEach(b => b.addEventListener('click', () => {
+    statusTab.lanes = statusTab.lanes === b.dataset.stat ? 'all' : b.dataset.stat; renderTasks();
+  }));
   ['#fPerson', '#fPartner', '#fClient', '#fCat', '#fPri'].forEach(s => $(s).addEventListener('change', renderTasks));
   $('#fText').addEventListener('input', renderTasks);
 
@@ -402,10 +415,13 @@
     const own = taskMode === 'own'; const personal = own && $('#tTypePer').checked;
     const staff = state.me.role === 'staff';
     $('#tTypeWrap').hidden = !own || staff;
-    $('#tWhoWrap').hidden = own; $('#tWho').required = !own;
+    // When editing, the owner and partners can always reassign a business task
+    const showWho = !personal && !staff && (!own || !!state.editing);
+    $('#tWhoWrap').hidden = !showWho; $('#tWho').required = showWho;
     $('#tPartnersWrap').hidden = personal || staff;
     // Category and client are compulsory when assigning, and for anything staff add
-    const req = !personal && (!own || staff || (state.editing && state.editing.createdBy !== state.me.id));
+    const forOther = showWho && $('#tWho').value && Number($('#tWho').value) !== state.me.id;
+    const req = !personal && (!own || staff || forOther || (state.editing && state.editing.createdBy !== state.me.id));
     $('#tCatReq').hidden = !req; $('#tClientReq').hidden = !req;
     $('#tCat').required = req; $('#tClient').required = req;
     $('#tCat').options[0].textContent = req ? 'Choose a category' : 'No category';
@@ -416,6 +432,7 @@
       : personal ? '' : 'Partners you tick can see and follow this task.';
   }
   document.querySelectorAll('input[name="tType"]').forEach(r => r.addEventListener('change', syncTaskType));
+  $('#tWho').addEventListener('change', syncTaskType);
   function openTask(t, mode) {
     state.editing = t || null;
     taskMode = t ? (t.assigneeId === state.me.id && t.createdBy === state.me.id ? 'own' : 'assign') : (mode || 'assign');
@@ -445,7 +462,8 @@
     const own = taskMode === 'own'; const personal = own && $('#tTypePer').checked;
     const body = { title: $('#tTitle').value.trim(), priority: $('#tPri').value, due: $('#tDue').value, notes: $('#tNotes').value.trim(),
       categoryId: $('#tCat').value ? Number($('#tCat').value) : null, clientId: $('#tClient').value ? Number($('#tClient').value) : null };
-    if (own) { body.visibility = personal ? 'personal' : 'business'; if (!personal) body.assigneeId = state.me.id; }
+    const pickWho = !$('#tWhoWrap').hidden;
+    if (own) { body.visibility = personal ? 'personal' : 'business'; body.assigneeId = pickWho ? Number($('#tWho').value) : state.me.id; }
     else body.assigneeId = Number($('#tWho').value);
     if (!personal && state.me.role !== 'staff') body.partnerIds = checkedIds($('#tPartners'));
     if (!own && !body.assigneeId) return showErr('#taskError', 'Choose who this task is for.');
