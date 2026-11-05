@@ -275,3 +275,18 @@ button.stat.on{border-color:var(--gold);background:var(--gold-soft);box-shadow:i
 .filter-note{font-size:.9rem;color:var(--muted);margin-right:auto;padding-left:6px}
 .filter-note .link{font-weight:600}
 .tasks-table td.acts{white-space:normal;min-width:150px;max-width:200px}
+
+/* multi-select client filter */
+.toolbar .msel-field{flex:1 1 180px;max-width:280px}
+.msel{position:relative}
+.msel-btn{position:relative;width:100%;text-align:left;font-weight:400;padding:9px 34px 9px 11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-height:42px}
+.msel-btn::after{content:"";position:absolute;right:14px;top:50%;width:7px;height:7px;border-right:2px solid var(--muted);border-bottom:2px solid var(--muted);transform:translateY(-70%) rotate(45deg)}
+.msel-btn.active{border-color:var(--gold);background:var(--gold-soft);font-weight:600}
+.msel-pop{position:absolute;z-index:20;top:calc(100% + 4px);left:0;width:max(100%,290px);max-width:calc(100vw - 32px);background:var(--surface);border:1px solid var(--line);border-radius:10px;box-shadow:0 14px 34px -14px rgba(0,0,0,.4);padding:10px;display:flex;flex-direction:column;gap:6px}
+.msel-actions{display:flex;justify-content:space-between}
+.msel-actions .link{font-size:.88rem;font-weight:600}
+.msel-list{max-height:300px;overflow:auto;display:flex;flex-direction:column}
+.msel-list label{flex-direction:row;align-items:center;gap:9px;text-transform:none;letter-spacing:0;font-size:.95rem;font-weight:500;color:var(--text);padding:6px 6px;border-radius:6px;cursor:pointer}
+.msel-list label:hover{background:var(--sunk)}
+.msel-list input{width:auto}
+.toolbar .msel-list label{flex:none;max-width:none}

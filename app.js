@@ -162,20 +162,20 @@
     sel.replaceChildren(); opt(sel, '', 'Everyone I can see'); addPeopleOptions(sel, true);
     sel.value = [...sel.options].some(o => o.value === keep) ? keep : '';
     fillSelect($('#fPartner'), 'Any partner', state.users.filter(u => u.role === 'partner' || u.role === 'owner').map(u => [u.id, u.name + (u.role === 'owner' ? ' (owner)' : '')]));
-    fillSelect($('#fClient'), 'All clients', state.clients.filter(c => c.active).map(c => [c.id, c.name]));
+    renderClientFilter();
     fillSelect($('#fCat'), 'All categories', state.categories.map(c => [c.id, c.name]));
     if (seesAll()) fillSelect($('#cMgr'), 'All partners', state.users.filter(u => u.role === 'partner').map(u => [u.id, u.name]));
   }
 
   /* ---------- tasks ---------- */
   function filteredTasks() {
-    const p = $('#fPerson').value, pt = $('#fPartner').value, cl = $('#fClient').value, ct = $('#fCat').value, pri = $('#fPri').value, q = $('#fText').value.trim().toLowerCase();
+    const p = $('#fPerson').value, pt = $('#fPartner').value, ct = $('#fCat').value, pri = $('#fPri').value, q = $('#fText').value.trim().toLowerCase();
     return state.tasks.filter(t => {
       if (t.visibility === 'personal') return false; // personal tasks live only in My feed
       if (p.startsWith('team:')) { const mid = Number(p.slice(5)); const u = userById(t.assigneeId); if (!(t.assigneeId === mid || (u && u.managerId === mid))) return false; }
       else if (p && t.assigneeId !== Number(p)) return false;
       if (pt && !t.partnerIds.includes(Number(pt))) return false;
-      if (cl && t.clientId !== Number(cl)) return false;
+      if (selClients.size && !selClients.has(t.clientId)) return false;
       if (ct && t.categoryId !== Number(ct)) return false;
       if (pri && t.priority !== pri) return false;
       if (q && !`${t.title} ${t.notes} ${t.progress} ${t.assigneeName} ${t.clientName} ${t.categoryName} ${t.partnerNames.join(' ')}`.toLowerCase().includes(q)) return false;
@@ -364,7 +364,39 @@
   document.querySelectorAll('#tasksPage .stat').forEach(b => b.addEventListener('click', () => {
     statusTab.lanes = statusTab.lanes === b.dataset.stat ? 'all' : b.dataset.stat; renderTasks();
   }));
-  ['#fPerson', '#fPartner', '#fClient', '#fCat', '#fPri'].forEach(s => $(s).addEventListener('change', renderTasks));
+  ['#fPerson', '#fPartner', '#fCat', '#fPri'].forEach(s => $(s).addEventListener('change', renderTasks));
+
+  /* Client filter: tick one or more clients */
+  const selClients = new Set();
+  function updateClientBtn() {
+    const n = selClients.size, b = $('#fClientBtn');
+    b.textContent = n === 0 ? 'All clients' : n === 1 ? (clientById([...selClients][0])?.name || '1 client') : n + ' clients';
+    b.classList.toggle('active', n > 0);
+  }
+  function renderClientFilter() {
+    const active = state.clients.filter(c => c.active);
+    for (const id of [...selClients]) if (!active.some(c => c.id === id)) selClients.delete(id);
+    const q = $('#fClientSearch').value.trim().toLowerCase();
+    const list = $('#fClientList'); list.replaceChildren();
+    const shown = active.filter(c => !q || `${c.name} ${c.code}`.toLowerCase().includes(q));
+    if (!shown.length) list.append(el('p', 'help', active.length ? 'No clients match.' : 'No clients yet.'));
+    for (const c of shown) {
+      const l = el('label'); const i = el('input'); i.type = 'checkbox'; i.id = 'fc-' + c.id; i.checked = selClients.has(c.id);
+      i.onchange = () => { i.checked ? selClients.add(c.id) : selClients.delete(c.id); updateClientBtn(); renderTasks(); };
+      l.append(i, document.createTextNode(c.name)); list.append(l);
+    }
+    updateClientBtn();
+  }
+  function setClientPop(open) {
+    $('#fClientPop').hidden = !open; $('#fClientBtn').setAttribute('aria-expanded', open);
+    if (open) { $('#fClientSearch').value = ''; renderClientFilter(); $('#fClientSearch').focus(); }
+  }
+  $('#fClientBtn').onclick = () => setClientPop($('#fClientPop').hidden);
+  $('#fClientSearch').addEventListener('input', renderClientFilter);
+  $('#fClientAll').onclick = () => { $('#fClientList').querySelectorAll('input').forEach(i => selClients.add(Number(i.id.slice(3)))); renderClientFilter(); renderTasks(); };
+  $('#fClientClear').onclick = () => { selClients.clear(); renderClientFilter(); renderTasks(); };
+  document.addEventListener('mousedown', e => { if (!$('#fClientPop').hidden && !$('#fClientBox').contains(e.target)) setClientPop(false); });
+  $('#fClientBox').addEventListener('keydown', e => { if (e.key === 'Escape') { setClientPop(false); $('#fClientBtn').focus(); } });
   $('#fText').addEventListener('input', renderTasks);
 
   /* shared pickers */
@@ -446,7 +478,7 @@
       $('#tTypePer').checked = t.visibility === 'personal'; $('#tTypeBiz').checked = t.visibility !== 'personal';
     } else if (taskMode === 'assign') {
       const fp = $('#fPerson').value; if (fp && !fp.startsWith('team:') && [...$('#tWho').options].some(o => o.value === fp)) $('#tWho').value = fp;
-      if ($('#fClient').value) $('#tClient').value = $('#fClient').value;
+      if (selClients.size === 1) $('#tClient').value = String([...selClients][0]);
       if ($('#fCat').value) $('#tCat').value = $('#fCat').value;
     }
     $('#taskDlgTitle').textContent = t ? 'Edit task' : taskMode === 'own' ? 'Add my task' : 'Assign task';
@@ -521,7 +553,7 @@
     h.append(el('h2', null, c.name)); h.append(el('p', 'sub', [c.code, c.entityType, c.active ? '' : 'Archived'].filter(Boolean).join(' · ')));
     head.append(h);
     const hb = el('div', 'mini');
-    if (lead()) hb.append(btn('Assign task', 'ghost', () => { $('#fClient').value = String(c.id); openTask(null); $('#tClient').value = String(c.id); $('#tClient').onchange(); }));
+    if (lead()) hb.append(btn('Assign task', 'ghost', () => { openTask(null); $('#tClient').value = String(c.id); $('#tClient').onchange(); }));
     if (c.canEdit) hb.append(btn('Edit client', '', () => openClient(c)));
     head.append(hb); box.append(head);
 

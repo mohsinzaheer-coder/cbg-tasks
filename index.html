@@ -79,7 +79,16 @@
       </div>
       <div class="toolbar">
         <label for="fPerson" id="fPersonWrap">Person<select id="fPerson"><option value="">Everyone I can see</option></select></label>
-        <label for="fClient">Client<select id="fClient"><option value="">All clients</option></select></label>
+        <div class="field msel-field"><span class="flabel" id="fClientLbl">Client</span>
+          <div class="msel" id="fClientBox">
+            <button type="button" class="msel-btn" id="fClientBtn" aria-haspopup="true" aria-expanded="false" aria-labelledby="fClientLbl fClientBtn">All clients</button>
+            <div class="msel-pop" id="fClientPop" hidden>
+              <input type="search" id="fClientSearch" placeholder="Search clients" aria-label="Search clients">
+              <div class="msel-actions"><button type="button" class="link" id="fClientAll">Tick all shown</button><button type="button" class="link" id="fClientClear">Clear</button></div>
+              <div class="msel-list" id="fClientList" role="group" aria-label="Clients"></div>
+            </div>
+          </div>
+        </div>
         <label for="fCat">Category<select id="fCat"><option value="">All categories</option></select></label>
         <label for="fPartner" id="fPartnerWrap">Partner<select id="fPartner"><option value="">Any partner</option></select></label>
         <label for="fPri">Priority<select id="fPri"><option value="">All</option><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option></select></label>
