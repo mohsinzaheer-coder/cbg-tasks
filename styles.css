@@ -290,3 +290,8 @@ button.stat.on{border-color:var(--gold);background:var(--gold-soft);box-shadow:i
 .msel-list label:hover{background:var(--sunk)}
 .msel-list input{width:auto}
 .toolbar .msel-list label{flex:none;max-width:none}
+
+/* international clients */
+.chip.intl{background:var(--accent-soft);color:var(--text);font-size:.7rem;padding:0 6px;vertical-align:1px}
+.msel-group{font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);padding:8px 6px 2px}
+.msel-actions{gap:8px}

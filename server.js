@@ -172,6 +172,18 @@ CREATE TABLE IF NOT EXISTS recurring (
   const r = db.prepare("UPDATE users SET role = 'partner' WHERE role = 'manager'").run();
   if (r.changes) console.log(`Database upgraded: ${r.changes} manager(s) are now partners.`);
 }
+// Version 2.9: international clients. They carry country and tax ID, and only the people in client_access (plus the owner) can see them.
+{
+  const cols = db.prepare('PRAGMA table_info(clients)').all().map(c => c.name);
+  if (!cols.includes('scope')) db.exec("ALTER TABLE clients ADD COLUMN scope TEXT NOT NULL DEFAULT 'local'");
+  if (!cols.includes('country')) db.exec("ALTER TABLE clients ADD COLUMN country TEXT NOT NULL DEFAULT ''");
+  if (!cols.includes('tax_id')) db.exec("ALTER TABLE clients ADD COLUMN tax_id TEXT NOT NULL DEFAULT ''");
+}
+db.exec(`CREATE TABLE IF NOT EXISTS client_access (
+  client_id INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+  user_id   INTEGER NOT NULL REFERENCES users(id),
+  PRIMARY KEY (client_id, user_id)
+)`);
 db.exec(`CREATE TABLE IF NOT EXISTS task_partners (
   task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
   user_id INTEGER NOT NULL REFERENCES users(id),
@@ -300,15 +312,40 @@ function canManageUser(me, target) {
   if (me.role === 'partner') return target.role === 'staff' && target.manager_id === me.id;
   return false;
 }
-// Clients this person may see: owner and partners all (partners read-only); manager — his clients or clients of his staff; staff — clients assigned to him
+/* Clients this person may see
+ *   local clients — owner and partners: all (partners edit the ones they are in charge of); staff: the ones assigned to them
+ *   international clients — only the owner and the people listed on the client */
 function visibleClientIds(me) {
-  if (me.role === 'owner' || me.role === 'partner') return null;
-  if (me.role === 'manager') {
-    const team = teamIds(me);
-    return db.prepare(`SELECT id FROM clients WHERE manager_id = ? UNION
-      SELECT client_id FROM client_staff WHERE user_id IN (${team.map(() => '?').join(',')})`).all(me.id, ...team).map(r => r.id ?? r.client_id);
+  if (me.role === 'owner') return null;
+  const intl = db.prepare("SELECT ca.client_id id FROM client_access ca JOIN clients c ON c.id = ca.client_id WHERE ca.user_id = ? AND c.scope = 'intl'").all(me.id).map(r => r.id);
+  const local = me.role === 'partner'
+    ? db.prepare("SELECT id FROM clients WHERE scope <> 'intl'").all().map(r => r.id)
+    : db.prepare("SELECT cs.client_id id FROM client_staff cs JOIN clients c ON c.id = cs.client_id WHERE cs.user_id = ? AND c.scope <> 'intl'").all(me.id).map(r => r.id);
+  return [...new Set([...local, ...intl])];
+}
+// Tasks and recurring tasks for an international client are hidden from anyone not listed on that client
+function intlCtx(me) {
+  return {
+    intl: new Set(db.prepare("SELECT id FROM clients WHERE scope = 'intl'").all().map(r => r.id)),
+    mine: new Set(db.prepare('SELECT client_id FROM client_access WHERE user_id = ?').all(me.id).map(r => r.client_id)),
+  };
+}
+function intlHidden(me, clientId, ctx) {
+  if (me.role === 'owner' || !clientId) return false;
+  ctx = ctx || intlCtx(me);
+  return ctx.intl.has(clientId) && !ctx.mine.has(clientId);
+}
+// Everyone working on or following a task for an international client must be listed on that client
+function checkIntlPeople(clientId, people) {
+  if (!clientId) return;
+  const c = db.prepare('SELECT scope, name FROM clients WHERE id = ?').get(clientId);
+  if (!c || c.scope !== 'intl') return;
+  for (const uid of new Set(people.filter(Boolean))) {
+    const u = db.prepare('SELECT name, role FROM users WHERE id = ?').get(uid);
+    if (!u || u.role === 'owner') continue;
+    if (!db.prepare('SELECT 1 FROM client_access WHERE client_id = ? AND user_id = ?').get(clientId, uid))
+      throw bad(`${u.name} can't see the international client ${c.name}. Add them to that client's people first.`);
   }
-  return db.prepare('SELECT client_id id FROM client_staff WHERE user_id = ?').all(me.id).map(r => r.id);
 }
 function canSeeClient(me, c) { if (!c) return false; const ids = visibleClientIds(me); return ids === null || ids.includes(c.id); }
 function canEditClient(me, c) { return me.role === 'owner' || (me.role === 'partner' && c.manager_id === me.id); }
@@ -327,9 +364,10 @@ function partnerMap() {
   return m;
 }
 const taskPartners = id => db.prepare('SELECT tp.user_id id, u.name FROM task_partners tp JOIN users u ON u.id = tp.user_id WHERE tp.task_id = ? ORDER BY u.name').all(id);
-function visibleTask(me, t, partners) {
+function visibleTask(me, t, partners, ctx) {
   if (!t) return false;
   if (t.visibility === 'personal') return t.created_by === me.id;
+  if (intlHidden(me, t.client_id, ctx)) return false;
   if (me.role === 'owner' || t.assignee_id === me.id || t.created_by === me.id) return true;
   if (me.role === 'partner') return teamIds(me).includes(t.assignee_id) || (partners ?? taskPartners(t.id)).some(p => p.id === me.id);
   return false;
@@ -408,7 +446,7 @@ function tx(fn) { db.exec('BEGIN'); try { const r = fn(); db.exec('COMMIT'); ret
 const routes = [];
 const route = (method, pattern, auth, fn) => routes.push({
   method, auth, fn,
-  re: new RegExp('^' + pattern.replace(/:auth\b/, '(?<auth>[A-Za-z]+)').replace(/:(\w+)/g, '(?<$1>\\d+)') + '$'),
+  re: new RegExp('^' + pattern.replace(/:auth\b/, '(?<auth>[^/]+)').replace(/:(\w+)/g, '(?<$1>\\d+)') + '$'),
 });
 
 /* ---- session ---- */
@@ -534,6 +572,8 @@ route('DELETE', '/api/users/:id', true, async (req, res, body, me, params) => {
       }
     }
     db.prepare("DELETE FROM task_partners WHERE user_id = ? AND task_id IN (SELECT id FROM tasks WHERE status <> 'done')").run(target.id);
+    if (to) db.prepare('INSERT OR IGNORE INTO client_access (client_id, user_id) SELECT client_id, ? FROM client_access WHERE user_id = ?').run(to.id, target.id);
+    db.prepare('DELETE FROM client_access WHERE user_id = ?').run(target.id);
     db.prepare('DELETE FROM client_staff WHERE user_id = ?').run(target.id);
     db.prepare('DELETE FROM sessions WHERE user_id = ?').run(target.id);
     db.prepare('UPDATE users SET deleted = 1, active = 0, username = ? WHERE id = ?').run(`deleted-${target.id}-${target.username}`.slice(0, 60), target.id);
@@ -567,6 +607,8 @@ function clientOut(c, me) {
     id: c.id, name: c.name, code: c.code, entityType: c.entity_type, ntn: c.ntn, strn: c.strn, cnic: c.cnic,
     contactPerson: c.contact_person, phone: c.phone, email: c.email, notes: c.notes, managerId: c.manager_id,
     managerName: c.manager_name || '', active: !!c.active, staffIds, logins, canEdit: canEditClient(me, c),
+    scope: c.scope === 'intl' ? 'intl' : 'local', country: c.country || '', taxId: c.tax_id || '',
+    accessIds: c.scope === 'intl' ? db.prepare('SELECT user_id FROM client_access WHERE client_id = ?').all(c.id).map(r => r.user_id) : [],
   };
 }
 const CLIENT_SELECT = 'SELECT c.*, m.name manager_name FROM clients c LEFT JOIN users m ON m.id = c.manager_id';
@@ -582,7 +624,8 @@ route('GET', '/api/clients', true, async (req, res, body, me) => {
 function clientFields(body, me, existing) {
   const f = {};
   const map = { name: ['name', 120, 'Client name'], code: ['code', 30, 'Client code'], ntn: ['ntn', 30, 'NTN'], strn: ['strn', 30, 'STRN'], cnic: ['cnic', 20, 'CNIC'],
-    contactPerson: ['contact_person', 80, 'Contact person'], phone: ['phone', 40, 'Phone'], email: ['email', 120, 'Email'], notes: ['notes', 2000, 'Notes'] };
+    contactPerson: ['contact_person', 80, 'Contact person'], phone: ['phone', 40, 'Phone'], email: ['email', 120, 'Email'], notes: ['notes', 2000, 'Notes'],
+    country: ['country', 60, 'Country'], taxId: ['tax_id', 40, 'Tax ID'] };
   for (const [k, [col, max, label]] of Object.entries(map)) if (k in body) f[col] = str(body[k], max, label);
   if ('name' in f && !f.name) throw bad('Enter the client name.');
   if ('entityType' in body) { if (!ENTITY_TYPES.includes(body.entityType)) throw bad('Choose a client type.'); f.entity_type = body.entityType; }
@@ -594,6 +637,13 @@ function clientFields(body, me, existing) {
   }
   if ('active' in body) { if (me.role !== 'owner') throw new HttpError(403, 'Only the owner can archive clients.'); f.active = body.active ? 1 : 0; }
   return f;
+}
+function setClientAccess(clientId, ids, managerId) {
+  if (!Array.isArray(ids)) throw bad('People list is not valid.');
+  const set = new Set(ids.map(Number)); if (managerId) set.add(managerId); // the partner in charge always has access
+  for (const id of set) if (!db.prepare("SELECT 1 FROM users WHERE id = ? AND role IN ('partner','staff') AND active = 1 AND deleted = 0").get(id)) throw bad('One of the chosen people is not active.');
+  db.prepare('DELETE FROM client_access WHERE client_id = ?').run(clientId);
+  const ins = db.prepare('INSERT INTO client_access (client_id, user_id) VALUES (?,?)'); for (const id of set) ins.run(clientId, id);
 }
 function setClientStaff(me, clientId, managerId, staffIds) {
   if (!Array.isArray(staffIds)) throw bad('Staff list is not valid.');
@@ -611,11 +661,13 @@ route('POST', '/api/clients', true, async (req, res, body, me) => {
   if (me.role === 'partner') body.managerId = me.id;
   if (!('name' in body)) throw bad('Enter the client name.');
   const f = clientFields(body, me, null);
+  f.scope = body.scope === 'intl' ? 'intl' : 'local';
   const id = tx(() => {
     const now = Date.now(); const cols = Object.keys(f);
     const r = db.prepare(`INSERT INTO clients (${cols.join(',')}, created_at, updated_at) VALUES (${cols.map(() => '?').join(',')}, ?, ?)`).run(...cols.map(k => f[k]), now, now);
     const cid = Number(r.lastInsertRowid);
-    if (body.staffIds) setClientStaff(me, cid, f.manager_id, body.staffIds);
+    if (f.scope === 'intl') setClientAccess(cid, body.accessIds || [], f.manager_id);
+    else if (body.staffIds) setClientStaff(me, cid, f.manager_id, body.staffIds);
     return cid;
   });
   send(res, 201, { client: clientOut(getClient(id), me) });
@@ -628,7 +680,20 @@ route('PATCH', '/api/clients/:id', true, async (req, res, body, me, params) => {
   tx(() => {
     const cols = Object.keys(f);
     if (cols.length) db.prepare(`UPDATE clients SET ${cols.map(k => k + ' = ?').join(', ')}, updated_at = ? WHERE id = ?`).run(...cols.map(k => f[k]), Date.now(), c.id);
-    if ('staffIds' in body) {
+    if (c.scope === 'intl') {
+      if ('accessIds' in body || 'managerId' in f) {
+        const cur = db.prepare('SELECT user_id FROM client_access WHERE client_id = ?').all(c.id).map(r => r.user_id);
+        const mid = 'manager_id' in f ? f.manager_id : c.manager_id;
+        const next = new Set([...(body.accessIds ?? cur).map(Number), ...(mid ? [mid] : [])]);
+        // Nobody may lose access while they still have open work for this client
+        for (const uid of cur.filter(id => !next.has(id))) {
+          const open = db.prepare("SELECT COUNT(*) n FROM tasks WHERE client_id = ? AND assignee_id = ? AND status <> 'done'").get(c.id, uid).n
+                     + db.prepare('SELECT COUNT(*) n FROM recurring WHERE client_id = ? AND assignee_id = ? AND active = 1').get(c.id, uid).n;
+          if (open) throw bad(`${db.prepare('SELECT name FROM users WHERE id = ?').get(uid).name} still has ${open} open or recurring task${open === 1 ? '' : 's'} for this client. Reassign them first.`);
+        }
+        setClientAccess(c.id, [...next], mid);
+      }
+    } else if ('staffIds' in body) {
       // a partner editing keeps staff from other teams that the owner assigned
       let keep = [];
       if (me.role === 'partner') keep = db.prepare('SELECT cs.user_id FROM client_staff cs JOIN users u ON u.id = cs.user_id WHERE cs.client_id = ? AND u.manager_id <> ?').all(c.id, me.id).map(r => r.user_id);
@@ -638,11 +703,18 @@ route('PATCH', '/api/clients/:id', true, async (req, res, body, me, params) => {
   });
   send(res, 200, { client: clientOut(getClient(c.id), me) });
 });
+// Local clients use the fixed Pakistani portals; international clients can name their own (HMRC, IRS, ...)
+function portalName(c, raw) {
+  let a; try { a = decodeURIComponent(String(raw)).trim(); } catch { throw bad('Unknown portal.'); }
+  if (c.scope !== 'intl') { a = a.toUpperCase(); if (!AUTHORITIES.includes(a)) throw bad('Unknown portal.'); return a; }
+  if (!/^[A-Za-z0-9 .&()'-]{1,40}$/.test(a)) throw bad('Portal name can use letters, numbers, spaces and . & ( ) - (up to 40 characters).');
+  return a;
+}
 route('PUT', '/api/clients/:id/logins/:auth', true, async (req, res, body, me, params) => {
-  const c = getClient(params.id); const auth = String(params.auth).toUpperCase();
+  const c = getClient(params.id);
   if (!canSeeClient(me, c)) throw new HttpError(404, 'Client not found.');
   if (!canEditClient(me, c)) throw new HttpError(403, 'You can view this client\'s logins but not change them.');
-  if (!AUTHORITIES.includes(auth)) throw bad('Unknown portal.');
+  const auth = portalName(c, params.auth);
   const loginId = str(body.loginId, 80, 'Login ID');
   const cur = db.prepare('SELECT * FROM client_logins WHERE client_id = ? AND authority = ?').get(c.id, auth);
   // null/undefined keeps the saved value; '' clears it
@@ -657,12 +729,13 @@ route('DELETE', '/api/clients/:id/logins/:auth', true, async (req, res, body, me
   const c = getClient(params.id);
   if (!canSeeClient(me, c)) throw new HttpError(404, 'Client not found.');
   if (!canEditClient(me, c)) throw new HttpError(403, 'You can view this client\'s logins but not change them.');
-  db.prepare('DELETE FROM client_logins WHERE client_id = ? AND authority = ?').run(c.id, String(params.auth).toUpperCase());
+  db.prepare('DELETE FROM client_logins WHERE client_id = ? AND authority = ?').run(c.id, portalName(c, params.auth));
   send(res, 200, { client: clientOut(getClient(c.id), me) });
 });
 route('POST', '/api/clients/:id/logins/:auth/reveal', true, async (req, res, body, me, params) => {
-  const c = getClient(params.id); const auth = String(params.auth).toUpperCase();
+  const c = getClient(params.id);
   if (!canSeeClient(me, c)) throw new HttpError(404, 'Client not found.');
+  const auth = portalName(c, params.auth);
   const l = db.prepare('SELECT * FROM client_logins WHERE client_id = ? AND authority = ?').get(c.id, auth);
   if (!l) throw new HttpError(404, 'No login saved for this portal.');
   const out = { loginId: l.login_id, password: decrypt(l.secret_enc), pin: decrypt(l.pin_enc) };
@@ -679,8 +752,8 @@ route('GET', '/api/clients/:id/access-log', true, async (req, res, body, me, par
 
 /* ---- tasks ---- */
 route('GET', '/api/tasks', true, async (req, res, body, me) => {
-  const pm = partnerMap();
-  const rows = db.prepare(TASK_SELECT + ' ORDER BY t.created_at DESC').all().filter(t => visibleTask(me, t, pm.get(t.id) || []));
+  const pm = partnerMap(); const ctx = intlCtx(me);
+  const rows = db.prepare(TASK_SELECT + ' ORDER BY t.created_at DESC').all().filter(t => visibleTask(me, t, pm.get(t.id) || [], ctx));
   send(res, 200, { tasks: rows.map(t => taskOut(t, me, pm.get(t.id) || [])) });
 });
 // Owner: anyone. Partner: any partner or staff member.
@@ -722,6 +795,7 @@ route('POST', '/api/tasks', true, async (req, res, body, me) => {
   }
   const cat = checkCategory(body.categoryId); const cli = checkClient(me, body.clientId);
   if (needsClientCat(me, a.id, me.id, visibility)) requireClientCat(cat, cli);
+  checkIntlPeople(cli, [a.id, ...partners]);
   const now = Date.now();
   const id = tx(() => {
     const r = db.prepare(`INSERT INTO tasks (title,notes,priority,due,assignee_id,created_by,created_at,updated_at,updated_by,category_id,client_id,visibility)
@@ -772,6 +846,8 @@ route('PATCH', '/api/tasks/:id', true, async (req, res, body, me, params) => {
     partners = [];
   } else if (me.role === 'manager' && t.created_by === me.id && assignee === me.id && !partners.length &&
              ('partnerIds' in body || 'visibility' in body || 'assigneeId' in body)) throw bad(NEED_PARTNER);
+  if ('clientId' in body || 'assigneeId' in body || 'partnerIds' in body)
+    checkIntlPeople('client_id' in sets ? sets.client_id : t.client_id, [assignee, ...(vis === 'personal' ? [] : partners)]);
   const keys = Object.keys(sets);
   tx(() => {
     if (keys.length) {
@@ -858,6 +934,7 @@ function ruleOut(r, me) {
 const RULE_SELECT = `SELECT r.*, k.name category_name, c.name client_name, a.name assignee_name FROM recurring r
   LEFT JOIN categories k ON k.id = r.category_id LEFT JOIN clients c ON c.id = r.client_id JOIN users a ON a.id = r.assignee_id`;
 function canSeeRule(me, r) {
+  if (intlHidden(me, r.client_id)) return false;
   if (me.role === 'owner') return true;
   if (r.created_by === me.id || r.assignee_id === me.id) return true;
   if (me.role === 'partner') return teamIds(me).includes(r.assignee_id) || (r.partner_ids || '').split(',').map(Number).includes(me.id);
@@ -885,6 +962,9 @@ function ruleFields(body, me, cur) {
   if ('notes' in body) f.notes = str(body.notes, 2000, 'Instructions');
   if ('active' in body) f.active = body.active ? 1 : 0;
   if ('partnerIds' in body) f.partner_ids = checkPartners(body.partnerIds, null).join(',');
+  if ('clientId' in body || 'assigneeId' in body || 'partnerIds' in body)
+    checkIntlPeople('client_id' in f ? f.client_id : cur?.client_id,
+      [f.assignee_id ?? cur?.assignee_id, ...(('partner_ids' in f ? f.partner_ids : cur?.partner_ids || '').split(',').filter(Boolean).map(Number))]);
   const freq = f.frequency ?? cur?.frequency;
   if (freq === 'annual' && !(f.due_month ?? cur?.due_month)) throw bad('Choose the month the yearly task is due.');
   if (freq === 'quarterly' && !(f.months ?? cur?.months)) throw bad('Choose the months the quarterly task is due.');

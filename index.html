@@ -53,6 +53,7 @@
         <button type="button" data-tab="tasks" class="on">Tasks</button>
         <button type="button" data-tab="feed" data-role="assign">My feed</button>
         <button type="button" data-tab="clients">Clients</button>
+        <button type="button" data-tab="intl" id="intlTab" hidden>International</button>
         <button type="button" data-tab="recurring" data-role="assign">Recurring</button>
         <button type="button" data-tab="people" data-role="mgmt">People</button>
       </nav>
@@ -84,7 +85,7 @@
             <button type="button" class="msel-btn" id="fClientBtn" aria-haspopup="true" aria-expanded="false" aria-labelledby="fClientLbl fClientBtn">All clients</button>
             <div class="msel-pop" id="fClientPop" hidden>
               <input type="search" id="fClientSearch" placeholder="Search clients" aria-label="Search clients">
-              <div class="msel-actions"><button type="button" class="link" id="fClientAll">Tick all shown</button><button type="button" class="link" id="fClientClear">Clear</button></div>
+              <div class="msel-actions"><button type="button" class="link" id="fClientAll">Tick all shown</button><button type="button" class="link" id="fClientIntl" hidden>International only</button><button type="button" class="link" id="fClientClear">Clear</button></div>
               <div class="msel-list" id="fClientList" role="group" aria-label="Clients"></div>
             </div>
           </div>
@@ -113,7 +114,7 @@
     <!-- Clients -->
     <section id="clientsPage" class="stack-lg" hidden>
       <div class="head">
-        <div><h1>Clients</h1><p class="sub" id="clientsSub"></p></div>
+        <div><h1 id="clientsTitle">Clients</h1><p class="sub" id="clientsSub"></p></div>
         <button class="primary" type="button" id="newClientBtn" hidden>+ Add client</button>
       </div>
       <div class="note warn" id="credsOff" hidden>Saving portal passwords is switched off. Ask the administrator to add a <b>CRED_KEY</b> setting on the server (see the guide).</div>
@@ -202,18 +203,20 @@
     </div>
     <div class="row3">
       <label for="kType">Type<select id="kType"></select></label>
-      <label for="kNtn">NTN<input id="kNtn" maxlength="30"></label>
-      <label for="kStrn">STRN<input id="kStrn" maxlength="30"></label>
+      <label for="kNtn" id="kNtnWrap">NTN<input id="kNtn" maxlength="30"></label>
+      <label for="kStrn" id="kStrnWrap">STRN<input id="kStrn" maxlength="30"></label>
+      <label for="kCountry" id="kCountryWrap">Country<input id="kCountry" maxlength="60" placeholder="e.g. United Kingdom"></label>
+      <label for="kTaxId" id="kTaxIdWrap">Tax / registration no.<input id="kTaxId" maxlength="40" placeholder="e.g. UTR, EIN, VAT no."></label>
     </div>
     <div class="row3">
-      <label for="kCnic">CNIC<input id="kCnic" maxlength="20" placeholder="35202-1234567-1"></label>
+      <label for="kCnic" id="kCnicWrap">CNIC<input id="kCnic" maxlength="20" placeholder="35202-1234567-1"></label>
       <label for="kContact">Contact person<input id="kContact" maxlength="80"></label>
       <label for="kPhone">Phone<input id="kPhone" maxlength="40"></label>
     </div>
     <label for="kEmail">Email<input id="kEmail" type="email" maxlength="120"></label>
     <div class="row2">
       <label for="kMgr" id="kMgrWrap">Partner in charge<select id="kMgr"></select></label>
-      <div class="field"><span class="flabel">Staff working on this client</span><div class="checks" id="kStaff"></div></div>
+      <div class="field"><span class="flabel" id="kStaffLbl">Staff working on this client</span><div class="checks" id="kStaff"></div></div>
     </div>
     <label for="kNotes">Notes<textarea id="kNotes" maxlength="2000" rows="2"></textarea></label>
     <label class="check" id="kActiveWrap"><input type="checkbox" id="kActive" checked> Active client</label>
@@ -227,6 +230,7 @@
   <form id="portalForm" class="stack" method="dialog" autocomplete="off">
     <h2 id="portalTitle">Portal login</h2>
     <p class="help" id="portalFor"></p>
+    <label for="pgName" id="pgNameWrap">Portal name<input id="pgName" maxlength="40" placeholder="e.g. HMRC, IRS, Companies House"></label>
     <label for="pgId">User ID / Registration no.<input id="pgId" maxlength="80" autocomplete="off"></label>
     <label for="pgPass">Password<input id="pgPass" type="text" maxlength="200" autocomplete="off" spellcheck="false"></label>
     <label for="pgPin">PIN (if any)<input id="pgPin" type="text" maxlength="50" autocomplete="off" spellcheck="false"></label>

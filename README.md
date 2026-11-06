@@ -66,6 +66,13 @@ Run it as a service (systemd or pm2) and put Nginx or Caddy in front for HTTPS. 
 
 ---
 
+## International clients
+
+The **International** tab holds clients outside Pakistan. Each one has country, tax/registration number, contact details and portal logins under any name (HMRC, IRS and so on).
+Only the owner and the partners and staff ticked under **People who can see this client** can see the client, its logins and its tasks. The partner in charge always has access.
+Tasks for international clients appear on the main Tasks board for those people, marked **Intl**. Use the Client filter's **International only** to show just them.
+Someone can only be removed from an international client once their open and recurring tasks for it have been reassigned.
+
 ## My feed and personal tasks
 
 The owner and partners have a **My feed** tab for their own to-dos. Each one is **Business** or **Personal**.

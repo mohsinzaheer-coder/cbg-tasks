@@ -5,7 +5,7 @@
   const PRI = { high: 0, medium: 1, low: 2 };
   const ROLE = { owner: 'Owner', partner: 'Partner', manager: 'Partner', staff: 'Staff' };
   const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
-  const state = { me: null, config: {}, users: [], tasks: [], clients: [], categories: [], rules: [], tab: 'tasks', confirm: null, editing: null, clientId: null };
+  const state = { clientScope: 'local', me: null, config: {}, users: [], tasks: [], clients: [], categories: [], rules: [], tab: 'tasks', confirm: null, editing: null, clientId: null };
 
   /* Common Pakistan filing deadlines as starting points. Change the day if a notification moves it. */
   const PRESETS = [
@@ -120,10 +120,13 @@
   function setTab(t) {
     state.tab = t;
     document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === t));
-    for (const p of ['tasks', 'feed', 'clients', 'recurring', 'people']) $('#' + p + 'Page').hidden = p !== t;
+    const page = t === 'intl' ? 'clients' : t; // International reuses the Clients page, showing international clients
+    if (t === 'clients' || t === 'intl') state.clientScope = t === 'intl' ? 'intl' : 'local';
+    for (const p of ['tasks', 'feed', 'clients', 'recurring', 'people']) $('#' + p + 'Page').hidden = p !== page;
   }
   $('#tabs').addEventListener('click', e => { const b = e.target.closest('button[data-tab]'); if (b) { setTab(b.dataset.tab); render(); } });
   function render() {
+    $('#intlTab').hidden = !(mgmt() || state.clients.some(c => c.scope === 'intl'));
     renderFilters(); renderBoards(); renderClients();
     if (lead()) renderRules();
     if (mgmt()) renderPeople();
@@ -264,7 +267,9 @@
     if (t.notes) td.append(el('small', 'tt-notes', t.notes));
     if (t.progress) { const p = el('small', 'tt-progress'); p.append(el('b', null, 'Progress: '), document.createTextNode(t.progress)); td.append(p); }
     tr.append(td);
-    tr.append(el('td', null, t.clientName || '—'));
+    const ctd = el('td', null, t.clientName || '—');
+    if (clientById(t.clientId)?.scope === 'intl') { ctd.append(document.createTextNode(' ')); ctd.append(el('span', 'chip intl', 'Intl')); }
+    tr.append(ctd);
     tr.append(el('td', null, t.categoryName || '—'));
     const who = el('td'); who.append(document.createTextNode(mine ? 'Me' : t.assigneeName));
     if (t.createdBy !== me.id && !t.recurringId) who.append(el('small', null, 'From ' + t.createdByName));
@@ -287,7 +292,7 @@
       ac.append(el('span', null, 'Delete? '), btn('Delete', 'ghost danger', () => delTask(t)), btn('Keep', 'ghost', () => { state.confirm = null; renderBoards(); }));
     } else {
       if (mine || t.canEdit) ac.append(btn(t.progress ? 'Note' : 'Add note', 'ghost', () => openNote(t)));
-      if (t.clientId && clientById(t.clientId)) ac.append(btn('Logins', 'ghost', () => { state.clientId = t.clientId; setTab('clients'); render(); }));
+      if (t.clientId && clientById(t.clientId)) ac.append(btn('Logins', 'ghost', () => { state.clientId = t.clientId; setTab(clientById(t.clientId)?.scope === 'intl' ? 'intl' : 'clients'); render(); }));
       if (t.canEdit) ac.append(btn('Edit', 'ghost', () => openTask(t)));
       if (t.canDelete) ac.append(btn('Delete', 'ghost danger', () => { state.confirm = key; renderBoards(); }));
     }
@@ -342,7 +347,7 @@
     }
     for (const [k] of STATUS) if (k !== t.status) a.append(btn(k === 'done' ? 'Mark done' : k === 'doing' ? 'Start' : 'Back to To do', 'ghost', () => patchTask(t, { status: k })));
     a.append(btn(t.progress ? 'Edit note' : 'Add note', 'ghost', () => openNote(t)));
-    if (t.clientId && clientById(t.clientId)) a.append(btn('Client logins', 'ghost', () => { state.clientId = t.clientId; setTab('clients'); render(); }));
+    if (t.clientId && clientById(t.clientId)) a.append(btn('Client logins', 'ghost', () => { state.clientId = t.clientId; setTab(clientById(t.clientId)?.scope === 'intl' ? 'intl' : 'clients'); render(); }));
     if (t.canEdit) a.append(btn('Edit', 'ghost', () => openTask(t)));
     if (t.canDelete) a.append(btn('Delete', 'ghost danger', () => { state.confirm = key; renderBoards(); }));
     c.append(a); return c;
@@ -378,9 +383,15 @@
     for (const id of [...selClients]) if (!active.some(c => c.id === id)) selClients.delete(id);
     const q = $('#fClientSearch').value.trim().toLowerCase();
     const list = $('#fClientList'); list.replaceChildren();
-    const shown = active.filter(c => !q || `${c.name} ${c.code}`.toLowerCase().includes(q));
+    const shown = active.filter(c => !q || `${c.name} ${c.code} ${c.country}`.toLowerCase().includes(q))
+      .sort((a, b) => (a.scope === 'intl') - (b.scope === 'intl') || a.name.localeCompare(b.name));
+    const hasIntl = active.some(c => c.scope === 'intl');
+    $('#fClientIntl').hidden = !hasIntl;
     if (!shown.length) list.append(el('p', 'help', active.length ? 'No clients match.' : 'No clients yet.'));
+    let heading = null;
     for (const c of shown) {
+      const h = hasIntl ? (c.scope === 'intl' ? 'International' : 'Local') : null;
+      if (h && h !== heading) { list.append(el('span', 'msel-group', h)); heading = h; }
       const l = el('label'); const i = el('input'); i.type = 'checkbox'; i.id = 'fc-' + c.id; i.checked = selClients.has(c.id);
       i.onchange = () => { i.checked ? selClients.add(c.id) : selClients.delete(c.id); updateClientBtn(); renderTasks(); };
       l.append(i, document.createTextNode(c.name)); list.append(l);
@@ -394,6 +405,7 @@
   $('#fClientBtn').onclick = () => setClientPop($('#fClientPop').hidden);
   $('#fClientSearch').addEventListener('input', renderClientFilter);
   $('#fClientAll').onclick = () => { $('#fClientList').querySelectorAll('input').forEach(i => selClients.add(Number(i.id.slice(3)))); renderClientFilter(); renderTasks(); };
+  $('#fClientIntl').onclick = () => { selClients.clear(); state.clients.filter(c => c.active && c.scope === 'intl').forEach(c => selClients.add(c.id)); renderClientFilter(); renderTasks(); };
   $('#fClientClear').onclick = () => { selClients.clear(); renderClientFilter(); renderTasks(); };
   document.addEventListener('mousedown', e => { if (!$('#fClientPop').hidden && !$('#fClientBox').contains(e.target)) setClientPop(false); });
   $('#fClientBox').addEventListener('keydown', e => { if (e.key === 'Escape') { setClientPop(false); $('#fClientBtn').focus(); } });
@@ -403,19 +415,28 @@
   function fillPeople(sel) { sel.replaceChildren(); opt(sel, '', 'Choose a person'); addPeopleOptions(sel, false); }
   function fillClients(sel, includeId) {
     sel.replaceChildren(); opt(sel, '', 'No client (internal)');
-    for (const c of state.clients.filter(c => c.active || c.id === includeId)) opt(sel, c.id, c.name + (c.code ? ` (${c.code})` : ''));
-    if (mgmt()) opt(sel, '__new', '+ Add new client…'); // owner and partners can create a client without leaving the form
+    const avail = state.clients.filter(c => c.active || c.id === includeId);
+    const label = c => c.name + (c.code ? ` (${c.code})` : '');
+    const local = avail.filter(c => c.scope !== 'intl'), intl = avail.filter(c => c.scope === 'intl');
+    if (intl.length) {
+      for (const [list, name] of [[local, 'Local clients'], [intl, 'International clients']]) {
+        if (!list.length) continue; const g = el('optgroup'); g.label = name;
+        for (const c of list) { const o = el('option', null, label(c)); o.value = c.id; g.append(o); }
+        sel.append(g);
+      }
+    } else for (const c of local) opt(sel, c.id, label(c));
+    if (mgmt()) { opt(sel, '__new', '+ Add new client…'); opt(sel, '__newintl', '+ Add new international client…'); } // create one without leaving the form
     sel.dataset.prev = sel.value;
   }
   let afterClientSave = null;
-  function addClientFrom(sel, onPicked) {
+  function addClientFrom(sel, onPicked, scope) {
     sel.value = sel.dataset.prev || '';
     afterClientSave = client => {
       const keepFirst = sel.options[0].textContent;
       fillClients(sel, client.id); sel.options[0].textContent = keepFirst;
       sel.value = String(client.id); sel.dataset.prev = sel.value; onPicked && onPicked();
     };
-    openClient(null);
+    openClient(null, scope || 'local');
   }
   function fillCats(sel) { sel.replaceChildren(); opt(sel, '', 'No category'); for (const c of state.categories) opt(sel, c.id, c.name); }
   function fillPartnerChecks(box, selected) {
@@ -433,10 +454,11 @@
   // When a client is chosen, pre-select a person who works on it
   function suggestPerson(clientSel, whoSel) {
     clientSel.onchange = () => {
-      if (clientSel.value === '__new') return addClientFrom(clientSel, () => clientSel.onchange());
+      if (clientSel.value === '__new' || clientSel.value === '__newintl') return addClientFrom(clientSel, () => clientSel.onchange(), clientSel.value === '__newintl' ? 'intl' : 'local');
       clientSel.dataset.prev = clientSel.value;
       const c = clientById(Number(clientSel.value)); if (!c || whoSel.value) return;
-      const pick = c.staffIds.find(id => userById(id)?.active) ?? (userById(c.managerId) ? c.managerId : null);
+      const pool = c.scope === 'intl' ? c.accessIds.filter(id => userById(id)?.role === 'staff') : c.staffIds;
+      const pick = pool.find(id => userById(id)?.active) ?? (userById(c.managerId) ? c.managerId : null);
       if (pick != null && [...whoSel.options].some(o => o.value === String(pick))) whoSel.value = String(pick);
     };
   }
@@ -520,21 +542,29 @@
   /* ---------- clients ---------- */
   function filteredClients() {
     const q = $('#cSearch').value.trim().toLowerCase(), mgr = $('#cMgr').value, all = $('#cShow').value === 'all';
-    return state.clients.filter(c => (all || c.active) && (!mgr || c.managerId === Number(mgr)) &&
-      (!q || `${c.name} ${c.code} ${c.ntn} ${c.strn} ${c.cnic} ${c.contactPerson}`.toLowerCase().includes(q)));
+    return state.clients.filter(c => c.scope === state.clientScope && (all || c.active) && (!mgr || c.managerId === Number(mgr)) &&
+      (!q || `${c.name} ${c.code} ${c.ntn} ${c.strn} ${c.cnic} ${c.contactPerson} ${c.country} ${c.taxId}`.toLowerCase().includes(q)));
   }
   function renderClients() {
     const list = $('#clientList'); list.replaceChildren();
+    const intl = state.clientScope === 'intl';
+    $('#clientsTitle').textContent = intl ? 'International clients' : 'Clients';
+    $('#clientsSub').textContent = intl
+      ? (state.me.role === 'owner' ? 'Each international client is visible only to you and the partners and staff listed on it.' : 'International clients you have been given access to. Only the people listed on each client can see it.')
+      : ({ owner: 'All clients, their registrations and portal logins.', partner: 'All clients and their portal logins. You can edit the clients you are in charge of.', staff: 'Clients you work on.' }[state.me.role] || '');
+    $('#newClientBtn').textContent = intl ? '+ Add international client' : '+ Add client';
+    $('#cSearch').placeholder = intl ? 'Name, code, country or tax ID' : 'Name, code, NTN or STRN';
     const items = filteredClients();
-    if (!items.length) list.append(el('p', 'empty-state', state.clients.length ? 'No clients match.' : mgmt() ? 'No clients yet. Use “Add client” to create the first one.' : 'No clients have been assigned to you yet.'));
-    if (state.clientId && !state.clients.some(c => c.id === state.clientId)) state.clientId = null;
+    const anyInScope = state.clients.some(c => c.scope === state.clientScope);
+    if (!items.length) list.append(el('p', 'empty-state', anyInScope ? 'No clients match.' : mgmt() ? `No ${intl ? 'international ' : ''}clients yet. Use “${$('#newClientBtn').textContent.slice(2)}” to create the first one.` : `No ${intl ? 'international ' : ''}clients have been shared with you yet.`));
+    if (state.clientId && clientById(state.clientId)?.scope !== state.clientScope) state.clientId = null;
     if (!state.clientId && items.length && matchMedia('(min-width: 861px)').matches) state.clientId = items[0].id;
     for (const c of items) {
       const b = btn('', 'client-item' + (c.id === state.clientId ? ' on' : ''), () => { state.clientId = c.id; renderClients(); if (!matchMedia('(min-width: 861px)').matches) $('#clientDetail').scrollIntoView({ block: 'start' }); });
       b.setAttribute('role', 'listitem');
       b.append(el('b', null, c.name));
       const open = state.tasks.filter(t => t.clientId === c.id && t.status !== 'done').length;
-      b.append(el('small', null, [c.code, c.entityType, c.ntn && 'NTN ' + c.ntn].filter(Boolean).join(' · ') || ' '));
+      b.append(el('small', null, (intl ? [c.code, c.country, c.taxId && 'Tax ID ' + c.taxId] : [c.code, c.entityType, c.ntn && 'NTN ' + c.ntn]).filter(Boolean).join(' · ') || ' '));
       const s = el('small', null, `${open} open task${open === 1 ? '' : 's'}` + (c.managerName ? ' · ' + c.managerName : ''));
       b.append(s); if (!c.active) b.append(el('small', 'off', 'Archived'));
       list.append(b);
@@ -550,7 +580,8 @@
     const c = clientById(state.clientId);
     if (!c) { box.append(el('p', 'empty-state', 'Select a client to see their details and portal logins.')); return; }
     const head = el('div', 'cd-head'); const h = el('div');
-    h.append(el('h2', null, c.name)); h.append(el('p', 'sub', [c.code, c.entityType, c.active ? '' : 'Archived'].filter(Boolean).join(' · ')));
+    const intl = c.scope === 'intl';
+    h.append(el('h2', null, c.name)); h.append(el('p', 'sub', [c.code, intl ? 'International' : '', c.entityType, c.active ? '' : 'Archived'].filter(Boolean).join(' · ')));
     head.append(h);
     const hb = el('div', 'mini');
     if (lead()) hb.append(btn('Assign task', 'ghost', () => { openTask(null); $('#tClient').value = String(c.id); $('#tClient').onchange(); }));
@@ -559,15 +590,23 @@
 
     const dl = el('dl', 'facts');
     const staffNames = c.staffIds.map(id => userById(id)?.name).filter(Boolean);
-    for (const [k, v] of [['NTN', c.ntn], ['STRN', c.strn], ['CNIC', c.cnic], ['Contact person', c.contactPerson], ['Phone', c.phone], ['Email', c.email], ['Partner in charge', c.managerName], ['Staff', staffNames.join(', ')]]) {
+    const accessNames = c.accessIds.map(id => userById(id)?.name).filter(Boolean);
+    const facts = intl
+      ? [['Country', c.country], ['Tax / registration no.', c.taxId], ['Contact person', c.contactPerson], ['Phone', c.phone], ['Email', c.email], ['Partner in charge', c.managerName], ['People with access', accessNames.join(', ')]]
+      : [['NTN', c.ntn], ['STRN', c.strn], ['CNIC', c.cnic], ['Contact person', c.contactPerson], ['Phone', c.phone], ['Email', c.email], ['Partner in charge', c.managerName], ['Staff', staffNames.join(', ')]];
+    for (const [k, v] of facts) {
       if (!v) continue; const d = el('div'); d.append(el('dt', null, k), el('dd', null, v)); dl.append(d);
     }
     if (dl.children.length) box.append(dl);
     if (c.notes) box.append(el('p', 'card-n', c.notes));
 
-    const ph = el('div', 'cd-head'); ph.append(el('h3', null, 'Portal logins')); box.append(ph);
+    const ph = el('div', 'cd-head'); ph.append(el('h3', null, 'Portal logins'));
+    if (intl && c.canEdit) ph.append(btn('+ Add portal login', 'ghost', () => openPortal(c, null, null)));
+    box.append(ph);
     const grid = el('div', 'portals');
-    for (const auth of state.config.authorities || []) {
+    const portalNames = intl ? c.logins.map(l => l.authority).sort() : (state.config.authorities || []);
+    if (intl && !portalNames.length) grid.append(el('p', 'help', c.canEdit ? 'No portal logins yet. Use “Add portal login” for HMRC, IRS or any other portal.' : 'No portal logins saved.'));
+    for (const auth of portalNames) {
       const l = c.logins.find(x => x.authority === auth);
       const p = el('div', 'portal' + (l ? '' : ' empty'));
       const t = el('h4', null, auth); p.append(t);
@@ -614,7 +653,7 @@
   }
   async function reveal(c, auth) {
     try {
-      const r = await api('POST', `/api/clients/${c.id}/logins/${auth}/reveal`);
+      const r = await api('POST', `/api/clients/${c.id}/logins/${encodeURIComponent(auth)}/reveal`);
       const key = c.id + ':' + auth;
       const timer = setTimeout(() => { revealed.delete(key); if (state.clientId === c.id) renderClientDetail(); }, 30000);
       revealed.set(key, { password: r.password, pin: r.pin, timer }); renderClientDetail();
@@ -629,8 +668,21 @@
     if (!staff.length) box.append(el('span', 'help', managerId || state.me.role === 'partner' ? 'No staff in this team yet.' : 'Choose a partner to see their staff.'));
     for (const s of staff) { const l = el('label'); const i = el('input'); i.type = 'checkbox'; i.value = s.id; i.checked = selected.includes(s.id); i.id = 'ks-' + s.id; l.append(i, document.createTextNode(s.name)); box.append(l); }
   }
-  function openClient(c) {
+  let clientDlgScope = 'local';
+  function accessChecks(selected) {
+    const box = $('#kStaff'); box.replaceChildren();
+    const people = state.users.filter(u => u.active && (u.role === 'partner' || u.role === 'staff'))
+      .sort((a, b) => (a.role === 'partner' ? 0 : 1) - (b.role === 'partner' ? 0 : 1) || a.name.localeCompare(b.name));
+    if (!people.length) box.append(el('span', 'help', 'No partners or staff yet.'));
+    for (const u of people) { const l = el('label'); const i = el('input'); i.type = 'checkbox'; i.value = u.id; i.checked = selected.includes(u.id); i.id = 'ks-' + u.id; l.append(i, document.createTextNode(u.name + (u.role === 'partner' ? ' (partner)' : ''))); box.append(l); }
+  }
+  function openClient(c, scope) {
     editClient = c || null; $('#clientForm').reset(); showErr('#clientError');
+    clientDlgScope = c ? c.scope : (scope || state.clientScope);
+    const intl = clientDlgScope === 'intl';
+    for (const id of ['#kNtnWrap', '#kStrnWrap', '#kCnicWrap']) $(id).hidden = intl;
+    for (const id of ['#kCountryWrap', '#kTaxIdWrap']) $(id).hidden = !intl;
+    $('#kStaffLbl').textContent = intl ? 'People who can see this client' : 'Staff working on this client';
     const type = $('#kType'); type.replaceChildren(); for (const t of state.config.entityTypes || []) opt(type, t, t);
     const owner = state.me.role === 'owner';
     $('#kMgrWrap').hidden = !owner; $('#kActiveWrap').hidden = !owner || !c;
@@ -639,18 +691,25 @@
     if (c) {
       $('#kName').value = c.name; $('#kCode').value = c.code; type.value = c.entityType; $('#kNtn').value = c.ntn; $('#kStrn').value = c.strn; $('#kCnic').value = c.cnic;
       $('#kContact').value = c.contactPerson; $('#kPhone').value = c.phone; $('#kEmail').value = c.email; $('#kNotes').value = c.notes; mgr.value = c.managerId ?? ''; $('#kActive').checked = c.active;
+      $('#kCountry').value = c.country; $('#kTaxId').value = c.taxId;
     } else type.value = 'Company';
-    staffChecks(Number(mgr.value) || null, c ? c.staffIds : []);
-    mgr.onchange = () => staffChecks(Number(mgr.value) || null, [...document.querySelectorAll('#kStaff input:checked')].map(i => Number(i.value)));
-    $('#clientDlgTitle').textContent = c ? 'Edit client' : 'Add client';
+    if (intl) { accessChecks(c ? c.accessIds : (state.me.role === 'partner' ? [state.me.id] : [])); mgr.onchange = null; }
+    else {
+      staffChecks(Number(mgr.value) || null, c ? c.staffIds : []);
+      mgr.onchange = () => staffChecks(Number(mgr.value) || null, [...document.querySelectorAll('#kStaff input:checked')].map(i => Number(i.value)));
+    }
+    $('#clientDlgTitle').textContent = (c ? 'Edit ' : 'Add ') + (intl ? 'international client' : 'client');
     $('#clientDlg').showModal(); $('#kName').focus();
   }
-  $('#newClientBtn').onclick = () => openClient(null);
+  $('#newClientBtn').onclick = () => openClient(null, state.clientScope);
   $('#clientForm').addEventListener('submit', async e => {
     e.preventDefault(); showErr('#clientError');
     const body = { name: $('#kName').value.trim(), code: $('#kCode').value.trim(), entityType: $('#kType').value, ntn: $('#kNtn').value.trim(), strn: $('#kStrn').value.trim(),
       cnic: $('#kCnic').value.trim(), contactPerson: $('#kContact').value.trim(), phone: $('#kPhone').value.trim(), email: $('#kEmail').value.trim(), notes: $('#kNotes').value.trim(),
-      staffIds: [...document.querySelectorAll('#kStaff input:checked')].map(i => Number(i.value)) };
+      country: $('#kCountry').value.trim(), taxId: $('#kTaxId').value.trim() };
+    const picked = [...document.querySelectorAll('#kStaff input:checked')].map(i => Number(i.value));
+    if (clientDlgScope === 'intl') body.accessIds = picked; else body.staffIds = picked;
+    if (!editClient) body.scope = clientDlgScope;
     if (state.me.role === 'owner') { body.managerId = $('#kMgr').value ? Number($('#kMgr').value) : null; if (editClient) body.active = $('#kActive').checked; }
     const b = $('#clientSave'); b.disabled = true;
     try {
@@ -666,25 +725,33 @@
   let portalCtx = null;
   function openPortal(c, auth, l) {
     portalCtx = { c, auth }; $('#portalForm').reset(); showErr('#portalError');
-    $('#portalTitle').textContent = auth + ' login'; $('#portalFor').textContent = c.name;
+    // International clients name their own portals; the name is chosen when the login is first added
+    $('#pgNameWrap').hidden = c.scope !== 'intl' || !!auth; $('#pgName').required = c.scope === 'intl' && !auth;
+    $('#portalTitle').textContent = auth ? auth + ' login' : 'Add portal login'; $('#portalFor').textContent = c.name;
     $('#pgId').value = l?.loginId || ''; $('#portalHint').hidden = !l; $('#pgClear').closest('label').hidden = !l; $('#pgDelete').hidden = !l;
     $('#pgPass').placeholder = l?.hasPassword ? 'Saved — type to replace' : ''; $('#pgPin').placeholder = l?.hasPin ? 'Saved — type to replace' : '';
-    $('#loginDlg').showModal(); $('#pgId').focus();
+    $('#loginDlg').showModal(); (auth ? $('#pgId') : $('#pgName')).focus();
   }
   $('#portalForm').addEventListener('submit', async e => {
     e.preventDefault(); showErr('#portalError');
     const clear = $('#pgClear').checked;
     const body = { loginId: $('#pgId').value.trim(), password: clear ? '' : ($('#pgPass').value || null), pin: clear ? '' : ($('#pgPin').value || null) };
+    const wasNew = !portalCtx.auth;
+    if (wasNew) {
+      portalCtx.auth = $('#pgName').value.trim();
+      if (!portalCtx.auth) return showErr('#portalError', 'Enter the portal name.');
+      if (portalCtx.c.logins.some(l => l.authority.toLowerCase() === portalCtx.auth.toLowerCase())) { const n = portalCtx.auth; portalCtx.auth = null; return showErr('#portalError', `A ${n} login is already saved. Use Edit on it instead.`); }
+    }
     try {
-      const { client } = await api('PUT', `/api/clients/${portalCtx.c.id}/logins/${portalCtx.auth}`, body);
+      const { client } = await api('PUT', `/api/clients/${portalCtx.c.id}/logins/${encodeURIComponent(portalCtx.auth)}`, body);
       const old = revealed.get(portalCtx.c.id + ':' + portalCtx.auth); if (old) { clearTimeout(old.timer); revealed.delete(portalCtx.c.id + ':' + portalCtx.auth); }
       state.clients = state.clients.map(x => x.id === client.id ? client : x); $('#loginDlg').close(); renderClientDetail(); toast(portalCtx.auth + ' login saved');
-    } catch (err) { showErr('#portalError', err.message); }
+    } catch (err) { if (wasNew) portalCtx.auth = null; showErr('#portalError', err.message); }
   });
   $('#pgDelete').onclick = async () => {
     if ($('#pgDelete').dataset.armed !== '1') { $('#pgDelete').dataset.armed = '1'; $('#pgDelete').textContent = 'Click again to delete'; setTimeout(() => { $('#pgDelete').dataset.armed = ''; $('#pgDelete').textContent = 'Delete login'; }, 4000); return; }
     try {
-      const { client } = await api('DELETE', `/api/clients/${portalCtx.c.id}/logins/${portalCtx.auth}`);
+      const { client } = await api('DELETE', `/api/clients/${portalCtx.c.id}/logins/${encodeURIComponent(portalCtx.auth)}`);
       state.clients = state.clients.map(x => x.id === client.id ? client : x); $('#loginDlg').close(); renderClientDetail(); toast(portalCtx.auth + ' login deleted');
     } catch (err) { showErr('#portalError', err.message); }
     finally { $('#pgDelete').dataset.armed = ''; $('#pgDelete').textContent = 'Delete login'; }
