@@ -175,7 +175,11 @@
       <label for="tCat"><span>Task category <em class="req" id="tCatReq">(required)</em></span><select id="tCat"></select></label>
       <label for="tClient"><span>Client <em class="req" id="tClientReq">(required)</em></span><select id="tClient"></select></label>
     </div>
-    <label for="tWho" id="tWhoWrap">Assign to<select id="tWho" required></select></label>
+    <div class="field" id="tWhoWrap"><span class="flabel">Assign to <em class="req">(tick one or more)</em></span>
+      <input type="search" id="tWhoSearch" placeholder="Find a person" aria-label="Find a person to assign">
+      <div class="checks who-list" id="tWhoList" role="group" aria-label="Assign to"></div>
+      <p class="help" id="tWhoSel"></p>
+    </div>
     <div class="field" id="tPartnersWrap"><span class="flabel" id="tPartnersLabel">Partners involved</span><div class="checks" id="tPartners"></div><p class="help" id="tPartnersHelp">Partners you tick can follow this task.</p></div>
     <div class="row2">
       <label for="tPri">Priority<select id="tPri"><option value="high">High</option><option value="medium" selected>Medium</option><option value="low">Low</option></select></label>

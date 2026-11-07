@@ -191,6 +191,13 @@ db.exec(`CREATE TABLE IF NOT EXISTS client_access (
   user_id   INTEGER NOT NULL REFERENCES users(id),
   PRIMARY KEY (client_id, user_id)
 )`);
+// Version 2.11: a task can be assigned to several people. tasks.assignee_id stays as the first (lead) assignee.
+db.exec(`CREATE TABLE IF NOT EXISTS task_assignees (
+  task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  user_id INTEGER NOT NULL REFERENCES users(id),
+  PRIMARY KEY (task_id, user_id)
+)`);
+db.exec('INSERT OR IGNORE INTO task_assignees (task_id, user_id) SELECT t.id, t.assignee_id FROM tasks t WHERE NOT EXISTS (SELECT 1 FROM task_assignees a WHERE a.task_id = t.id)');
 db.exec(`CREATE TABLE IF NOT EXISTS task_partners (
   task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
   user_id INTEGER NOT NULL REFERENCES users(id),
@@ -384,31 +391,53 @@ function partnerMap() {
   return m;
 }
 const taskPartners = id => db.prepare('SELECT tp.user_id id, u.name FROM task_partners tp JOIN users u ON u.id = tp.user_id WHERE tp.task_id = ? ORDER BY u.name').all(id);
+const ASSIGNEE_ORDER = 'ORDER BY (ta.user_id = t.assignee_id) DESC, u.name';
+function assigneeMap() {
+  const m = new Map();
+  for (const r of db.prepare(`SELECT ta.task_id, ta.user_id, u.name FROM task_assignees ta JOIN users u ON u.id = ta.user_id JOIN tasks t ON t.id = ta.task_id ${ASSIGNEE_ORDER}`).all()) {
+    if (!m.has(r.task_id)) m.set(r.task_id, []);
+    m.get(r.task_id).push({ id: r.user_id, name: r.name });
+  }
+  return m;
+}
+// Everyone a task is assigned to (lead first); cached on the row
+function aList(t) {
+  if (!t._as || !t._as.length) {
+    t._as = db.prepare(`SELECT ta.user_id id, u.name FROM task_assignees ta JOIN users u ON u.id = ta.user_id JOIN tasks t ON t.id = ta.task_id WHERE ta.task_id = ? ${ASSIGNEE_ORDER}`).all(t.id);
+    if (!t._as.length) t._as = [{ id: t.assignee_id, name: t.assignee_name || '' }];
+  }
+  return t._as;
+}
+const aIds = t => aList(t).map(a => a.id);
+function setTaskAssignees(taskId, ids) {
+  db.prepare('DELETE FROM task_assignees WHERE task_id = ?').run(taskId);
+  const ins = db.prepare('INSERT INTO task_assignees (task_id, user_id) VALUES (?,?)'); for (const id of ids) ins.run(taskId, id);
+}
 function visibleTask(me, t, partners, ctx) {
   if (!t) return false;
   if (t.visibility === 'personal') return t.created_by === me.id;
   if (intlHidden(me, t.client_id, ctx)) return false;
-  if (me.role === 'owner' || t.assignee_id === me.id || t.created_by === me.id) return true;
-  if (me.role === 'partner') return teamIds(me).includes(t.assignee_id) || (partners ?? taskPartners(t.id)).some(p => p.id === me.id);
+  if (me.role === 'owner' || aIds(t).includes(me.id) || t.created_by === me.id) return true;
+  if (me.role === 'partner') { const team = teamIds(me); return aIds(t).some(id => team.includes(id)) || (partners ?? taskPartners(t.id)).some(p => p.id === me.id); }
   return false;
 }
 function canEditTask(me, t) {
   if (t.visibility === 'personal') return t.created_by === me.id;
   if (me.role === 'owner' || t.created_by === me.id) return true;
-  if (me.role === 'partner' && t.assignee_id === me.id) return true; // a partner can pass work given to him on to his staff
-  if (me.role === 'partner') return t.assignee_id !== me.id && teamIds(me).includes(t.assignee_id);
+  if (me.role === 'partner' && aIds(t).includes(me.id)) return true; // a partner can pass work given to him on to his staff
+  if (me.role === 'partner') { const team = teamIds(me); return aIds(t).some(id => id !== me.id && team.includes(id)); }
   return false;
 }
 function taskOut(t, me, partners) {
   const ps = partners ?? taskPartners(t.id);
   return {
     id: t.id, title: t.title, notes: t.notes, priority: t.priority, due: t.due, status: t.status, progress: t.progress,
-    assigneeId: t.assignee_id, assigneeName: t.assignee_name, createdBy: t.created_by, createdByName: t.creator_name,
+    assigneeId: t.assignee_id, assigneeIds: aIds(t), assigneeNames: aList(t).map(a => a.name), assigneeName: aList(t).map(a => a.name).join(', '), createdBy: t.created_by, createdByName: t.creator_name,
     categoryId: t.category_id, categoryName: t.category_name || '', clientId: t.client_id, clientName: t.client_name || '',
     recurringId: t.recurring_id, period: t.period, visibility: t.visibility || 'business',
     partnerIds: ps.map(p => p.id), partnerNames: ps.map(p => p.name),
     createdAt: t.created_at, updatedAt: t.updated_at, doneAt: t.done_at, canEdit: canEditTask(me, t),
-    canDelete: canDeleteTask(me, t), selfAdded: t.created_by === t.assignee_id,
+    canDelete: canDeleteTask(me, t), selfAdded: t.created_by === t.assignee_id && aList(t).length === 1,
   };
 }
 // Deleting stays with the owner, the person who created the task, and the partner over the assignee
@@ -416,7 +445,8 @@ function canDeleteTask(me, t) {
   if (me.role === 'staff') return false;
   if (t.visibility === 'personal') return t.created_by === me.id;
   if (me.role === 'owner' || t.created_by === me.id) return true;
-  return me.role === 'partner' && t.assignee_id !== me.id && teamIds(me).includes(t.assignee_id);
+  if (me.role !== 'partner' || aIds(t).includes(me.id)) return false;
+  const team = teamIds(me); return aIds(t).some(id => team.includes(id));
 }
 function checkPartners(list, excludeId) {
   if (list == null) return [];
@@ -535,7 +565,7 @@ route('PATCH', '/api/users/:id', true, async (req, res, body, me, params) => {
     if (!WORK_AREAS.includes(body.workArea)) throw bad('Choose Local, International or Both.');
     const losing = body.workArea === 'local' ? 'intl' : body.workArea === 'intl' ? 'local' : null;
     if (losing) {
-      const open = db.prepare(`SELECT COUNT(*) n FROM tasks t JOIN clients c ON c.id = t.client_id WHERE t.assignee_id = ? AND t.status <> 'done' AND ${losing === 'intl' ? "c.scope = 'intl'" : "c.scope <> 'intl'"}`).get(target.id).n;
+      const open = db.prepare(`SELECT COUNT(*) n FROM task_assignees ta JOIN tasks t ON t.id = ta.task_id JOIN clients c ON c.id = t.client_id WHERE ta.user_id = ? AND t.status <> 'done' AND ${losing === 'intl' ? "c.scope = 'intl'" : "c.scope <> 'intl'"}`).get(target.id).n;
       if (open) throw bad(`${target.name} still has ${open} open ${losing === 'intl' ? 'international' : 'local'} task${open === 1 ? '' : 's'}. Reassign them first.`);
       if (losing === 'intl' && db.prepare('SELECT 1 FROM client_access WHERE user_id = ?').get(target.id)) db.prepare('DELETE FROM client_access WHERE user_id = ?').run(target.id);
     }
@@ -576,7 +606,7 @@ route('DELETE', '/api/users/:id', true, async (req, res, body, me, params) => {
     throw bad('Move this partner\'s staff to another partner first.');
   const n = sql => db.prepare(sql).get(target.id).n;
   // Personal tasks are never handed over; they stay private and hidden.
-  const openTasks = n("SELECT COUNT(*) n FROM tasks WHERE assignee_id = ? AND status <> 'done' AND visibility = 'business'");
+  const openTasks = n("SELECT COUNT(*) n FROM task_assignees ta JOIN tasks t ON t.id = ta.task_id WHERE ta.user_id = ? AND t.status <> 'done' AND t.visibility = 'business'");
   const rules = n('SELECT COUNT(*) n FROM recurring WHERE assignee_id = ?');
   const managed = n('SELECT COUNT(*) n FROM clients WHERE manager_id = ?');
   const assigned = n('SELECT COUNT(*) n FROM client_staff WHERE user_id = ?');
@@ -590,6 +620,8 @@ route('DELETE', '/api/users/:id', true, async (req, res, body, me, params) => {
   }
   tx(() => {
     if (to) {
+      db.prepare("INSERT OR IGNORE INTO task_assignees (task_id, user_id) SELECT ta.task_id, ? FROM task_assignees ta JOIN tasks t ON t.id = ta.task_id WHERE ta.user_id = ? AND t.status <> 'done' AND t.visibility = 'business'").run(to.id, target.id);
+      db.prepare("DELETE FROM task_assignees WHERE user_id = ? AND task_id IN (SELECT id FROM tasks WHERE status <> 'done' AND visibility = 'business')").run(target.id);
       db.prepare("UPDATE tasks SET assignee_id = ?, updated_at = ?, updated_by = ? WHERE assignee_id = ? AND status <> 'done' AND visibility = 'business'").run(to.id, Date.now(), me.id, target.id);
       db.prepare('UPDATE recurring SET assignee_id = ? WHERE assignee_id = ?').run(to.id, target.id);
       if (managed) db.prepare('UPDATE clients SET manager_id = ?, updated_at = ? WHERE manager_id = ?').run(to.id, Date.now(), target.id);
@@ -723,7 +755,7 @@ route('PATCH', '/api/clients/:id', true, async (req, res, body, me, params) => {
         const next = new Set([...(body.accessIds ?? cur).map(Number), ...(mid ? [mid] : [])]);
         // Nobody may lose access while they still have open work for this client
         for (const uid of cur.filter(id => !next.has(id))) {
-          const open = db.prepare("SELECT COUNT(*) n FROM tasks WHERE client_id = ? AND assignee_id = ? AND status <> 'done'").get(c.id, uid).n
+          const open = db.prepare("SELECT COUNT(*) n FROM task_assignees ta JOIN tasks t ON t.id = ta.task_id WHERE t.client_id = ? AND ta.user_id = ? AND t.status <> 'done'").get(c.id, uid).n
                      + db.prepare('SELECT COUNT(*) n FROM recurring WHERE client_id = ? AND assignee_id = ? AND active = 1').get(c.id, uid).n;
           if (open) throw bad(`${db.prepare('SELECT name FROM users WHERE id = ?').get(uid).name} still has ${open} open or recurring task${open === 1 ? '' : 's'} for this client. Reassign them first.`);
         }
@@ -788,8 +820,9 @@ route('GET', '/api/clients/:id/access-log', true, async (req, res, body, me, par
 
 /* ---- tasks ---- */
 route('GET', '/api/tasks', true, async (req, res, body, me) => {
-  const pm = partnerMap(); const ctx = intlCtx(me);
-  const rows = db.prepare(TASK_SELECT + ' ORDER BY t.created_at DESC').all().filter(t => visibleTask(me, t, pm.get(t.id) || [], ctx));
+  const pm = partnerMap(); const am = assigneeMap(); const ctx = intlCtx(me);
+  const rows = db.prepare(TASK_SELECT + ' ORDER BY t.created_at DESC').all()
+    .map(t => { t._as = am.get(t.id); return t; }).filter(t => visibleTask(me, t, pm.get(t.id) || [], ctx));
   send(res, 200, { tasks: rows.map(t => taskOut(t, me, pm.get(t.id) || [])) });
 });
 // Owner: anyone. Partner: any partner or staff member.
@@ -804,7 +837,14 @@ function checkAssignee(me, id) {
 }
 const canHavePersonal = me => ['owner', 'partner', 'manager'].includes(me.role);
 // Client and category are compulsory on work assigned to someone else, and on anything staff add
-const needsClientCat = (me, assigneeId, creatorId, visibility) => visibility === 'business' && (assigneeId !== creatorId || me.role === 'staff');
+const needsClientCat = (me, assigneeIds, creatorId, visibility) => visibility === 'business' && (assigneeIds.some(id => id !== creatorId) || me.role === 'staff');
+function readAssignees(body) {
+  const raw = Array.isArray(body.assigneeIds) ? body.assigneeIds : [body.assigneeId];
+  const ids = [...new Set(raw.map(Number).filter(n => Number.isInteger(n) && n > 0))];
+  if (!ids.length) throw bad('Choose who this task is for.');
+  if (ids.length > 25) throw bad('Choose up to 25 people for one task.');
+  return ids;
+}
 function requireClientCat(cat, cli) {
   if (cat == null) throw bad('Choose a task category.');
   if (cli == null) throw bad('Choose a client.');
@@ -820,25 +860,25 @@ route('POST', '/api/tasks', true, async (req, res, body, me) => {
   const priority = ['high', 'medium', 'low'].includes(body.priority) ? body.priority : 'medium';
   if (!isDate(due)) throw bad('Due date is not valid.');
   const visibility = body.visibility === 'personal' ? 'personal' : 'business';
-  let a, partners;
+  let people, partners;
   if (visibility === 'personal') {
     if (!canHavePersonal(me)) throw new HttpError(403, 'Personal tasks are not available for staff.');
-    a = me; partners = []; // a personal task is always your own and nobody else sees it
+    people = [me.id]; partners = []; // a personal task is always your own and nobody else sees it
   } else {
-    a = checkAssignee(me, body.assigneeId);
+    people = readAssignees(body).map(id => checkAssignee(me, id).id);
     partners = checkPartners(body.partnerIds, null);
-    if (me.role === 'manager' && a.id === me.id && !partners.length) throw bad(NEED_PARTNER);
   }
   const cat = checkCategory(body.categoryId); const cli = checkClient(me, body.clientId);
-  if (needsClientCat(me, a.id, me.id, visibility)) requireClientCat(cat, cli);
-  checkIntlPeople(cli, [a.id, ...partners]);
-  checkWorkArea(cli, [a.id]);
+  if (needsClientCat(me, people, me.id, visibility)) requireClientCat(cat, cli);
+  checkIntlPeople(cli, [...people, ...partners]);
+  checkWorkArea(cli, people);
   const now = Date.now();
   const id = tx(() => {
     const r = db.prepare(`INSERT INTO tasks (title,notes,priority,due,assignee_id,created_by,created_at,updated_at,updated_by,category_id,client_id,visibility)
-                          VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`).run(title, notes, priority, due, a.id, me.id, now, now, me.id, cat, cli, visibility);
-    setTaskPartners(Number(r.lastInsertRowid), partners);
-    return Number(r.lastInsertRowid);
+                          VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`).run(title, notes, priority, due, people[0], me.id, now, now, me.id, cat, cli, visibility);
+    const tid = Number(r.lastInsertRowid);
+    setTaskAssignees(tid, people); setTaskPartners(tid, partners);
+    return tid;
   });
   send(res, 201, { task: taskOut(db.prepare(TASK_SELECT + ' WHERE t.id = ?').get(id), me) });
 });
@@ -846,25 +886,34 @@ route('PATCH', '/api/tasks/:id', true, async (req, res, body, me, params) => {
   const t = db.prepare(TASK_SELECT + ' WHERE t.id = ?').get(Number(params.id));
   if (!visibleTask(me, t)) throw new HttpError(404, 'Task not found.');
   const full = canEditTask(me, t); const sets = {};
+  const curPeople = aIds(t); const mine = curPeople.includes(me.id);
   if ('status' in body) {
     if (!['todo', 'doing', 'done'].includes(body.status)) throw bad('Unknown status.');
-    if (!full && t.assignee_id !== me.id) throw new HttpError(403, 'You can only update your own tasks.');
+    if (!full && !mine) throw new HttpError(403, 'You can only update your own tasks.');
     sets.status = body.status; sets.done_at = body.status === 'done' ? Date.now() : null;
   }
   if ('progress' in body) {
-    if (!full && t.assignee_id !== me.id) throw new HttpError(403, 'You can only update your own tasks.');
+    if (!full && !mine) throw new HttpError(403, 'You can only update your own tasks.');
     sets.progress = str(body.progress, 1000, 'Progress note');
   }
-  for (const f of ['title', 'notes', 'priority', 'due', 'assigneeId', 'categoryId', 'clientId']) {
+  for (const f of ['title', 'notes', 'priority', 'due', 'categoryId', 'clientId']) {
     if (!(f in body)) continue;
     if (!full) throw new HttpError(403, 'You can update status and progress only.');
     if (f === 'title') { const v = str(body.title, 160, 'Task'); if (!v) throw bad('Enter a task title.'); sets.title = v; }
     if (f === 'notes') sets.notes = str(body.notes, 2000, 'Notes');
     if (f === 'priority') { if (!['high', 'medium', 'low'].includes(body.priority)) throw bad('Unknown priority.'); sets.priority = body.priority; }
     if (f === 'due') { const v = str(body.due, 10, 'Due date'); if (!isDate(v)) throw bad('Due date is not valid.'); sets.due = v; }
-    if (f === 'assigneeId') sets.assignee_id = checkAssignee(me, body.assigneeId).id;
     if (f === 'categoryId') sets.category_id = checkCategory(body.categoryId);
     if (f === 'clientId') sets.client_id = (intOrNull(body.clientId) === t.client_id) ? t.client_id : checkClient(me, body.clientId);
+  }
+  const changingPeople = 'assigneeIds' in body || 'assigneeId' in body;
+  let people = curPeople;
+  if (changingPeople) {
+    if (!full) throw new HttpError(403, 'You can update status and progress only.');
+    // people already on the task may stay; anyone new must be someone you are allowed to assign
+    people = readAssignees(body).map(id => curPeople.includes(id) ? id : checkAssignee(me, id).id);
+    const lead = people.includes(t.assignee_id) ? t.assignee_id : people[0]; // keep the lead assignee if they are still on it
+    if (lead !== t.assignee_id) sets.assignee_id = lead;
   }
   if ('visibility' in body) {
     if (!['business', 'personal'].includes(body.visibility)) throw bad('Choose Business or Personal.');
@@ -873,27 +922,27 @@ route('PATCH', '/api/tasks/:id', true, async (req, res, body, me, params) => {
     sets.visibility = body.visibility;
   }
   if ('partnerIds' in body && !full) throw new HttpError(403, 'You can update status and progress only.');
-  if (('categoryId' in body || 'clientId' in body || 'assigneeId' in body) &&
-      needsClientCat(me, sets.assignee_id ?? t.assignee_id, t.created_by, sets.visibility ?? t.visibility))
+  const vis = sets.visibility ?? t.visibility;
+  if (('categoryId' in body || 'clientId' in body || changingPeople) && needsClientCat(me, people, t.created_by, vis))
     requireClientCat('category_id' in sets ? sets.category_id : t.category_id, 'client_id' in sets ? sets.client_id : t.client_id);
-  const vis = sets.visibility ?? t.visibility, assignee = sets.assignee_id ?? t.assignee_id;
   let partners = 'partnerIds' in body ? checkPartners(body.partnerIds, null) : taskPartners(t.id).map(p => p.id);
   if (vis === 'personal') {
-    if (assignee !== t.created_by) throw bad('A personal task can only be for the person who added it.');
+    if (people.length !== 1 || people[0] !== t.created_by) throw bad('A personal task can only be for the person who added it.');
     partners = [];
-  } else if (me.role === 'manager' && t.created_by === me.id && assignee === me.id && !partners.length &&
-             ('partnerIds' in body || 'visibility' in body || 'assigneeId' in body)) throw bad(NEED_PARTNER);
-  if ('clientId' in body || 'assigneeId' in body || 'partnerIds' in body)
-    checkIntlPeople('client_id' in sets ? sets.client_id : t.client_id, [assignee, ...(vis === 'personal' ? [] : partners)]);
-  if ('clientId' in body || 'assigneeId' in body) checkWorkArea('client_id' in sets ? sets.client_id : t.client_id, [assignee]);
+  }
+  const client = 'client_id' in sets ? sets.client_id : t.client_id;
+  if ('clientId' in body || changingPeople || 'partnerIds' in body) checkIntlPeople(client, [...people, ...(vis === 'personal' ? [] : partners)]);
+  if ('clientId' in body || changingPeople) checkWorkArea(client, people);
+  // a partner who hands his part on stays involved so he can follow it
+  if (me.role === 'partner' && mine && !people.includes(me.id) && vis === 'business' && !partners.includes(me.id)) partners.push(me.id);
   const keys = Object.keys(sets);
   tx(() => {
     if (keys.length) {
       sets.updated_at = Date.now(); sets.updated_by = me.id; keys.push('updated_at', 'updated_by');
       db.prepare(`UPDATE tasks SET ${keys.map(k => k + ' = ?').join(', ')} WHERE id = ?`).run(...keys.map(k => sets[k]), t.id);
     }
-    if (me.role === 'partner' && t.assignee_id === me.id && assignee !== me.id && vis === 'business' && !partners.includes(me.id)) partners.push(me.id);
-    if ('partnerIds' in body || vis === 'personal' || assignee !== t.assignee_id) setTaskPartners(t.id, partners);
+    if (changingPeople) setTaskAssignees(t.id, people);
+    if ('partnerIds' in body || vis === 'personal' || changingPeople) setTaskPartners(t.id, partners);
   });
   send(res, 200, { task: taskOut(db.prepare(TASK_SELECT + ' WHERE t.id = ?').get(t.id), me) });
 });
@@ -952,6 +1001,7 @@ function generateRecurring(onlyId) {
         const pids = (r.partner_ids || '').split(',').filter(Boolean).map(Number)
           .filter(id => db.prepare("SELECT 1 FROM users WHERE id = ? AND role IN ('partner','owner') AND active = 1 AND deleted = 0").get(id));
         setTaskPartners(Number(ins.lastInsertRowid), pids);
+        setTaskAssignees(Number(ins.lastInsertRowid), [r.assignee_id]);
         made++;
       }
       db.prepare('UPDATE recurring SET last_due = ? WHERE id = ?').run(list[list.length - 1].due, r.id);

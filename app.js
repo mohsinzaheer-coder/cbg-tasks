@@ -183,8 +183,8 @@
     return state.tasks.filter(t => {
       if (t.visibility === 'personal') return false; // personal tasks live only in My feed
       if ((state.board === 'intl') !== isIntlTask(t)) return false;
-      if (p.startsWith('team:')) { const mid = Number(p.slice(5)); const u = userById(t.assigneeId); if (!(t.assigneeId === mid || (u && u.managerId === mid))) return false; }
-      else if (p && t.assigneeId !== Number(p)) return false;
+      if (p.startsWith('team:')) { const mid = Number(p.slice(5)); if (!t.assigneeIds.some(id => id === mid || userById(id)?.managerId === mid)) return false; }
+      else if (p && !t.assigneeIds.includes(Number(p))) return false;
       if (pt && !t.partnerIds.includes(Number(pt))) return false;
       if (selClients.size && !selClients.has(t.clientId)) return false;
       if (ct && t.categoryId !== Number(ct)) return false;
@@ -215,6 +215,8 @@
     }
     return v;
   }
+  // "Me" for my own part; every assignee is listed when a task is shared
+  const whoText = t => t.assigneeIds.map((id, i) => id === state.me.id ? 'Me' : (t.assigneeNames?.[i] || userById(id)?.name || '')).filter(Boolean).join(', ') || t.assigneeName;
   function drawLanes(host, tasks, emptyText) {
     host.className = 'task-host'; host.replaceChildren();
     const cur = statusTab[host.id] || 'all';
@@ -261,7 +263,7 @@
     if (total > list.length) host.append(el('p', 'help', `Showing ${list.length} of ${total}. Use the filters or search to narrow it down.`));
   }
   function taskRow(t) {
-    const me = state.me; const mine = t.assigneeId === me.id; const late = isLate(t);
+    const me = state.me; const mine = t.assigneeIds.includes(me.id); const late = isLate(t);
     const tr = el('tr', late ? 'late-row' : t.status === 'done' ? 'done-row' : '');
     // Task
     const td = el('td', 'tt-task');
@@ -279,7 +281,7 @@
     if (clientById(t.clientId)?.scope === 'intl') { ctd.append(document.createTextNode(' ')); ctd.append(el('span', 'chip intl', 'Intl')); }
     tr.append(ctd);
     tr.append(el('td', null, t.categoryName || '—'));
-    const who = el('td'); who.append(document.createTextNode(mine ? 'Me' : t.assigneeName));
+    const who = el('td'); who.append(document.createTextNode(whoText(t)));
     if (t.createdBy !== me.id && !t.recurringId) who.append(el('small', null, 'From ' + t.createdByName));
     tr.append(who);
     tr.append(el('td', 'tt-partners', t.partnerNames.join(', ') || '—'));
@@ -332,14 +334,14 @@
   }
   function renderFeed() {
     const ty = $('#feedType').value, q = $('#feedText').value.trim().toLowerCase();
-    const mineAll = state.tasks.filter(t => t.assigneeId === state.me.id);
+    const mineAll = state.tasks.filter(t => t.assigneeIds.includes(state.me.id));
     const mine = mineAll.filter(t => (!ty || t.visibility === ty) && (!q || `${t.title} ${t.notes} ${t.progress} ${t.clientName}`.toLowerCase().includes(q)));
     drawLanes($('#feedLanes'), mine, mineAll.length ? null : 'Nothing here yet. Use “Add my task” to add your first to-do.');
   }
   $('#feedType').addEventListener('change', renderFeed);
   $('#feedText').addEventListener('input', renderFeed);
   function card(t) {
-    const me = state.me; const mine = t.assigneeId === me.id;
+    const me = state.me; const mine = t.assigneeIds.includes(me.id);
     const c = el('article', 'card' + (isLate(t) ? ' overdue' : ''));
     const tags = el('div', 'meta');
     if (t.visibility === 'personal') tags.append(el('span', 'chip personal', 'Personal · only you'));
@@ -355,7 +357,7 @@
     if (t.partnerNames.length) { const p = el('p', 'partners-line'); p.append(document.createTextNode('Partners: '), el('b', null, t.partnerNames.join(', '))); c.append(p); }
     const m = el('div', 'meta');
     m.append(el('span', 'pill p-' + t.priority, t.priority));
-    if (lead() || !mine) { const w = el('span', 'who'); w.append(el('span', 'av', initials(t.assigneeName)), document.createTextNode(mine ? 'Me' : t.assigneeName)); m.append(w); }
+    if (lead() || !mine) { const w = el('span', 'who'); w.append(el('span', 'av', initials(t.assigneeName)), document.createTextNode(whoText(t))); m.append(w); }
     if (t.due) m.append(el('span', isLate(t) ? 'late' : '', (isLate(t) ? 'Overdue · ' : 'Due ') + fmtDate(t.due)));
     if (t.createdBy !== me.id && !t.recurringId) m.append(el('span', null, 'From ' + t.createdByName));
     c.append(m);
@@ -480,19 +482,52 @@
     }
   }
   const checkedIds = box => [...box.querySelectorAll('input:checked')].map(i => Number(i.value));
-  // When a client is chosen, pre-select a person who works on it
+  /* Assign to: tick one or more people. Built from the same grouped list as the dropdowns. */
+  const whoBox = () => $('#tWhoList');
+  const getWho = () => [...whoBox().querySelectorAll('input:checked')].map(i => Number(i.value));
+  function updateWhoSummary() {
+    const ids = getWho();
+    $('#tWhoSel').textContent = ids.length ? 'Selected: ' + ids.map(id => id === state.me.id ? 'Me' : userById(id)?.name).filter(Boolean).join(', ') : 'No one selected yet.';
+  }
+  function renderWho(scope, selected) {
+    const box = whoBox(); box.replaceChildren(); box.dataset.scope = scope || '';
+    const tmp = document.createElement('select'); addPeopleOptions(tmp, false, scope);
+    const q = $('#tWhoSearch').value.trim().toLowerCase();
+    const add = o => {
+      const id = Number(o.value); if (q && !o.textContent.toLowerCase().includes(q) && !selected.includes(id)) return;
+      const l = el('label'); const i = el('input'); i.type = 'checkbox'; i.value = id; i.id = 'tw-' + id; i.checked = selected.includes(id);
+      l.append(i, document.createTextNode(o.textContent)); box.append(l);
+    };
+    for (const n of [...tmp.children]) {
+      if (n.tagName !== 'OPTGROUP') { add(n); continue; }
+      const h = el('span', 'who-group', n.label); box.append(h); const before = box.children.length;
+      for (const o of [...n.children]) add(o);
+      if (box.children.length === before) h.remove();
+    }
+    if (!box.querySelector('input')) box.append(el('span', 'help', q ? 'No one matches.' : 'No one to assign yet. Add people on the People tab.'));
+    updateWhoSummary();
+  }
+  function tickWho(id) { const cb = whoBox().querySelector('#tw-' + id); if (cb) { cb.checked = true; updateWhoSummary(); } return !!cb; }
+  whoBox().addEventListener('change', () => { updateWhoSummary(); syncTaskType(); });
+  $('#tWhoSearch').addEventListener('input', () => renderWho(whoBox().dataset.scope || null, getWho()));
+  $('#tWhoSearch').addEventListener('keydown', e => { if (e.key === 'Enter') e.preventDefault(); });
+
+  // When a client is chosen, pre-select a person who works on it ('who' means the task form's tick list)
   function suggestPerson(clientSel, whoSel) {
     clientSel.onchange = () => {
       if (clientSel.value === '__new' || clientSel.value === '__newintl') return addClientFrom(clientSel, () => clientSel.onchange(), clientSel.value === '__newintl' ? 'intl' : 'local');
       clientSel.dataset.prev = clientSel.value;
       const c = clientById(Number(clientSel.value));
       // only list staff whose "Works on" setting covers this kind of client
-      if (lead()) fillPeople(whoSel, c ? (c.scope === 'intl' ? 'intl' : 'local') : null);
-      if (whoSel.id === 'tWho') syncTaskType();
-      if (!c || whoSel.value) return;
+      const isWho = whoSel === 'who', scope = c ? (c.scope === 'intl' ? 'intl' : 'local') : null;
+      if (lead()) { if (isWho) renderWho(scope, getWho()); else fillPeople(whoSel, scope); }
+      if (isWho) syncTaskType();
+      if (!c || (isWho ? getWho().length : whoSel.value)) return;
       const pool = c.scope === 'intl' ? c.accessIds.filter(id => userById(id)?.role === 'staff') : c.staffIds;
       const pick = pool.find(id => userById(id)?.active) ?? (userById(c.managerId) ? c.managerId : null);
-      if (pick != null && [...whoSel.options].some(o => o.value === String(pick))) whoSel.value = String(pick);
+      if (pick == null) return;
+      if (isWho) { if (tickWho(pick)) syncTaskType(); }
+      else if ([...whoSel.options].some(o => o.value === String(pick))) whoSel.value = String(pick);
     };
   }
 
@@ -504,10 +539,10 @@
     $('#tTypeWrap').hidden = !own || staff;
     // When editing, the owner and partners can always reassign a business task
     const showWho = !personal && !staff && (!own || !!state.editing);
-    $('#tWhoWrap').hidden = !showWho; $('#tWho').required = showWho;
+    $('#tWhoWrap').hidden = !showWho;
     $('#tPartnersWrap').hidden = personal || staff;
     // Category and client are compulsory when assigning, and for anything staff add
-    const forOther = showWho && $('#tWho').value && Number($('#tWho').value) !== state.me.id;
+    const forOther = showWho && getWho().some(id => id !== state.me.id);
     const req = !personal && (!own || staff || forOther || (state.editing && state.editing.createdBy !== state.me.id));
     $('#tCatReq').hidden = !req; $('#tClientReq').hidden = !req;
     $('#tCat').required = req; $('#tClient').required = req;
@@ -519,29 +554,29 @@
       : personal ? '' : 'Partners you tick can see and follow this task.';
   }
   document.querySelectorAll('input[name="tType"]').forEach(r => r.addEventListener('change', syncTaskType));
-  $('#tWho').addEventListener('change', syncTaskType);
   function openTask(t, mode) {
     state.editing = t || null;
-    taskMode = t ? (t.assigneeId === state.me.id && t.createdBy === state.me.id ? 'own' : 'assign') : (mode || 'assign');
+    taskMode = t ? (t.assigneeIds.length === 1 && t.assigneeIds[0] === state.me.id && t.createdBy === state.me.id ? 'own' : 'assign') : (mode || 'assign');
     $('#taskForm').reset(); showErr('#taskError');
     fillCats($('#tCat')); const boardScope = !t && taskMode === 'assign' && state.tab === 'tasks' ? (state.board === 'intl' ? 'intl' : 'local') : null;
     const taskScope = t && t.clientId ? (clientById(t.clientId)?.scope === 'intl' ? 'intl' : 'local') : boardScope;
-    fillClients($('#tClient'), t?.clientId, boardScope); fillPeople($('#tWho'), taskScope);
-    suggestPerson($('#tClient'), $('#tWho'));
+    fillClients($('#tClient'), t?.clientId, boardScope);
+    $('#tWhoSearch').value = ''; renderWho(taskScope, t ? t.assigneeIds : []);
+    suggestPerson($('#tClient'), 'who');
     fillPartnerChecks($('#tPartners'), t ? t.partnerIds : []);
     if (t) {
-      $('#tTitle').value = t.title; $('#tWho').value = String(t.assigneeId); $('#tPri').value = t.priority; $('#tDue').value = t.due; $('#tNotes').value = t.notes;
+      $('#tTitle').value = t.title; $('#tPri').value = t.priority; $('#tDue').value = t.due; $('#tNotes').value = t.notes;
       $('#tCat').value = t.categoryId ?? ''; $('#tClient').value = t.clientId ?? '';
       $('#tTypePer').checked = t.visibility === 'personal'; $('#tTypeBiz').checked = t.visibility !== 'personal';
     } else if (taskMode === 'assign') {
-      const fp = $('#fPerson').value; if (fp && !fp.startsWith('team:') && [...$('#tWho').options].some(o => o.value === fp)) $('#tWho').value = fp;
+      const fp = $('#fPerson').value; if (fp && !fp.startsWith('team:')) tickWho(fp);
       if (selClients.size === 1) $('#tClient').value = String([...selClients][0]);
       if ($('#fCat').value) $('#tCat').value = $('#fCat').value;
     }
     $('#taskDlgTitle').textContent = t ? 'Edit task' : taskMode === 'own' ? 'Add my task' : 'Assign task';
     $('#taskSave').textContent = t ? 'Save changes' : taskMode === 'own' ? 'Add task' : 'Assign task';
     syncTaskType();
-    if (taskMode === 'assign' && $('#tWho').options.length < 2) showErr('#taskError', 'Add people on the People tab first.');
+    if (taskMode === 'assign' && !whoBox().querySelector('input')) showErr('#taskError', 'Add people on the People tab first.');
     $('#taskDlg').showModal(); $('#tTitle').focus();
   }
   $('#newTaskBtn').onclick = () => openTask(null, lead() ? 'assign' : 'own');
@@ -552,10 +587,10 @@
     const body = { title: $('#tTitle').value.trim(), priority: $('#tPri').value, due: $('#tDue').value, notes: $('#tNotes').value.trim(),
       categoryId: $('#tCat').value ? Number($('#tCat').value) : null, clientId: $('#tClient').value ? Number($('#tClient').value) : null };
     const pickWho = !$('#tWhoWrap').hidden;
-    if (own) { body.visibility = personal ? 'personal' : 'business'; body.assigneeId = pickWho ? Number($('#tWho').value) : state.me.id; }
-    else body.assigneeId = Number($('#tWho').value);
+    if (own) { body.visibility = personal ? 'personal' : 'business'; body.assigneeIds = personal ? [state.me.id] : pickWho ? getWho() : [state.me.id]; }
+    else body.assigneeIds = getWho();
     if (!personal && state.me.role !== 'staff') body.partnerIds = checkedIds($('#tPartners'));
-    if (!own && !body.assigneeId) return showErr('#taskError', 'Choose who this task is for.');
+    if (!body.assigneeIds.length) return showErr('#taskError', 'Tick at least one person under Assign to.');
     if ($('#tCat').required && !body.categoryId) return showErr('#taskError', 'Choose a task category.');
     if ($('#tClient').required && !body.clientId) return showErr('#taskError', 'Choose a client.');
     if (own && !personal && state.me.role === 'manager' && !body.partnerIds.length) return showErr('#taskError', 'Choose at least one partner who can follow this task.');
@@ -897,7 +932,7 @@
   }
 
   /* ---------- people ---------- */
-  function openCount(id) { const mine = state.tasks.filter(t => t.assigneeId === id); return { open: mine.filter(t => t.status !== 'done').length, late: mine.filter(isLate).length }; }
+  function openCount(id) { const mine = state.tasks.filter(t => t.assigneeIds.includes(id)); return { open: mine.filter(t => t.status !== 'done').length, late: mine.filter(isLate).length }; }
   function personRow(u, tag) {
     const li = el('li');
     const wb = el('div', 'who-big'); wb.append(el('span', 'av lg', initials(u.name)));
@@ -1007,7 +1042,7 @@
   let delUser = null, delNeedsTransfer = false;
   function openDelete(u) {
     delUser = u; showErr('#delError');
-    const open = state.tasks.filter(t => t.assigneeId === u.id && t.status !== 'done' && t.visibility !== 'personal').length;
+    const open = state.tasks.filter(t => t.assigneeIds.includes(u.id) && t.status !== 'done' && t.visibility !== 'personal').length;
     const rules = state.rules.filter(r => r.assigneeId === u.id).length;
     const cl = state.clients.filter(c => c.managerId === u.id || c.staffIds.includes(u.id)).length;
     const staffCount = state.users.filter(x => x.managerId === u.id).length;

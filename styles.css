@@ -301,3 +301,10 @@ button.stat.on{border-color:var(--gold);background:var(--gold-soft);box-shadow:i
 .board-switch button{border:0;background:transparent;color:var(--bg);opacity:.7;font-family:var(--f-display);font-weight:600;font-size:.95rem;padding:9px 20px;border-radius:9px}
 .board-switch button:hover{opacity:1}
 .board-switch button.on{background:var(--gold);color:#151413;opacity:1}
+
+/* assign to several people */
+#tWhoWrap{gap:6px}
+.who-list{max-height:220px;flex-direction:column;flex-wrap:nowrap;gap:0;padding:4px 8px}
+.who-list label{padding:5px 2px}
+.who-group{font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);padding:8px 0 2px}
+#tWhoSel{color:var(--text);font-weight:500}

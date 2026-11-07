@@ -76,6 +76,10 @@ Someone can only be removed from an international client once their open and rec
 The **Tasks** page has two dashboards, **Local** and **International**, each with its own counts, filters and table.
 Each staff member has a **Works on** setting (Local, International, or Both) on the People page. It decides which dashboard they see, which kind of client tasks they can be given, and whether they can be given access to international clients.
 
+## Tasks for several people
+
+**Assign to** is a tick list: tick one or more people. A task given to several people is one shared task. Everyone on it sees it and can update its status and notes, and when anyone marks it Done it is done for all.
+
 ## My feed and personal tasks
 
 The owner and partners have a **My feed** tab for their own to-dos. Each one is **Business** or **Personal**.
