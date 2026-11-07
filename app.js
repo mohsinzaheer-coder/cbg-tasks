@@ -26,6 +26,7 @@
   const today = () => state.config.today && new Date().toDateString() === state.loadedOn ? state.config.today : (() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; })();
   const fmtDate = s => { if (!s) return ''; const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' }); };
   const fmtTime = ms => new Date(ms).toLocaleString(undefined, { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' });
+  const money = v => /^\d+(\.\d+)?$/.test(v || '') ? 'Rs ' + Number(v).toLocaleString('en-PK') : (v || '');
   const isLate = t => t.status !== 'done' && t.due && t.due < today();
   const userById = id => state.users.find(u => u.id === id);
   const clientById = id => state.clients.find(c => c.id === id);
@@ -101,6 +102,7 @@
     $('#peopleSub').textContent = me.role === 'owner' ? 'Partners and the staff who report to each of them.' : 'The staff who report to you.';
     $('#newPersonBtn').textContent = me.role === 'owner' ? '+ Add person' : '+ Add staff member';
     $('#catPanel').hidden = me.role !== 'owner';
+    $('#importRulesBtn').hidden = me.role !== 'owner';
     if ((!lead() && ['recurring', 'feed'].includes(state.tab)) || (!mgmt() && state.tab === 'people')) state.tab = 'tasks';
     setTab(state.tab);
     await refresh();
@@ -483,19 +485,19 @@
   }
   const checkedIds = box => [...box.querySelectorAll('input:checked')].map(i => Number(i.value));
   /* Assign to: tick one or more people. Built from the same grouped list as the dropdowns. */
-  const whoBox = () => $('#tWhoList');
-  const getWho = () => [...whoBox().querySelectorAll('input:checked')].map(i => Number(i.value));
-  function updateWhoSummary() {
-    const ids = getWho();
-    $('#tWhoSel').textContent = ids.length ? 'Selected: ' + ids.map(id => id === state.me.id ? 'Me' : userById(id)?.name).filter(Boolean).join(', ') : 'No one selected yet.';
+  const whoBox = (p = 't') => $('#' + p + 'WhoList');
+  const getWho = (p = 't') => [...whoBox(p).querySelectorAll('input:checked')].map(i => Number(i.value));
+  function updateWhoSummary(p = 't') {
+    const ids = getWho(p);
+    $('#' + p + 'WhoSel').textContent = ids.length ? 'Selected: ' + ids.map(id => id === state.me.id ? 'Me' : userById(id)?.name).filter(Boolean).join(', ') : 'No one selected yet.';
   }
-  function renderWho(scope, selected) {
-    const box = whoBox(); box.replaceChildren(); box.dataset.scope = scope || '';
+  function renderWho(scope, selected, p = 't') {
+    const box = whoBox(p); box.replaceChildren(); box.dataset.scope = scope || '';
     const tmp = document.createElement('select'); addPeopleOptions(tmp, false, scope);
-    const q = $('#tWhoSearch').value.trim().toLowerCase();
+    const q = $('#' + p + 'WhoSearch').value.trim().toLowerCase();
     const add = o => {
       const id = Number(o.value); if (q && !o.textContent.toLowerCase().includes(q) && !selected.includes(id)) return;
-      const l = el('label'); const i = el('input'); i.type = 'checkbox'; i.value = id; i.id = 'tw-' + id; i.checked = selected.includes(id);
+      const l = el('label'); const i = el('input'); i.type = 'checkbox'; i.value = id; i.id = p + 'w-' + id; i.checked = selected.includes(id);
       l.append(i, document.createTextNode(o.textContent)); box.append(l);
     };
     for (const n of [...tmp.children]) {
@@ -505,12 +507,14 @@
       if (box.children.length === before) h.remove();
     }
     if (!box.querySelector('input')) box.append(el('span', 'help', q ? 'No one matches.' : 'No one to assign yet. Add people on the People tab.'));
-    updateWhoSummary();
+    updateWhoSummary(p);
   }
-  function tickWho(id) { const cb = whoBox().querySelector('#tw-' + id); if (cb) { cb.checked = true; updateWhoSummary(); } return !!cb; }
-  whoBox().addEventListener('change', () => { updateWhoSummary(); syncTaskType(); });
-  $('#tWhoSearch').addEventListener('input', () => renderWho(whoBox().dataset.scope || null, getWho()));
-  $('#tWhoSearch').addEventListener('keydown', e => { if (e.key === 'Enter') e.preventDefault(); });
+  function tickWho(id, p = 't') { const cb = whoBox(p).querySelector('#' + p + 'w-' + id); if (cb) { cb.checked = true; updateWhoSummary(p); } return !!cb; }
+  for (const p of ['t', 'r']) {
+    whoBox(p).addEventListener('change', () => { updateWhoSummary(p); if (p === 't') syncTaskType(); });
+    $('#' + p + 'WhoSearch').addEventListener('input', () => renderWho(whoBox(p).dataset.scope || null, getWho(p), p));
+    $('#' + p + 'WhoSearch').addEventListener('keydown', e => { if (e.key === 'Enter') e.preventDefault(); });
+  }
 
   // When a client is chosen, pre-select a person who works on it ('who' means the task form's tick list)
   function suggestPerson(clientSel, whoSel) {
@@ -519,14 +523,14 @@
       clientSel.dataset.prev = clientSel.value;
       const c = clientById(Number(clientSel.value));
       // only list staff whose "Works on" setting covers this kind of client
-      const isWho = whoSel === 'who', scope = c ? (c.scope === 'intl' ? 'intl' : 'local') : null;
-      if (lead()) { if (isWho) renderWho(scope, getWho()); else fillPeople(whoSel, scope); }
-      if (isWho) syncTaskType();
-      if (!c || (isWho ? getWho().length : whoSel.value)) return;
+      const isWho = typeof whoSel === 'string', scope = c ? (c.scope === 'intl' ? 'intl' : 'local') : null;
+      if (lead()) { if (isWho) renderWho(scope, getWho(whoSel), whoSel); else fillPeople(whoSel, scope); }
+      if (whoSel === 't') syncTaskType();
+      if (!c || (isWho ? getWho(whoSel).length : whoSel.value)) return;
       const pool = c.scope === 'intl' ? c.accessIds.filter(id => userById(id)?.role === 'staff') : c.staffIds;
       const pick = pool.find(id => userById(id)?.active) ?? (userById(c.managerId) ? c.managerId : null);
       if (pick == null) return;
-      if (isWho) { if (tickWho(pick)) syncTaskType(); }
+      if (isWho) { if (tickWho(pick, whoSel) && whoSel === 't') syncTaskType(); }
       else if ([...whoSel.options].some(o => o.value === String(pick))) whoSel.value = String(pick);
     };
   }
@@ -562,7 +566,7 @@
     const taskScope = t && t.clientId ? (clientById(t.clientId)?.scope === 'intl' ? 'intl' : 'local') : boardScope;
     fillClients($('#tClient'), t?.clientId, boardScope);
     $('#tWhoSearch').value = ''; renderWho(taskScope, t ? t.assigneeIds : []);
-    suggestPerson($('#tClient'), 'who');
+    suggestPerson($('#tClient'), 't');
     fillPartnerChecks($('#tPartners'), t ? t.partnerIds : []);
     if (t) {
       $('#tTitle').value = t.title; $('#tPri').value = t.priority; $('#tDue').value = t.due; $('#tNotes').value = t.notes;
@@ -663,7 +667,7 @@
     const accessNames = c.accessIds.map(id => userById(id)?.name).filter(Boolean);
     const facts = intl
       ? [['Country', c.country], ['Tax / registration no.', c.taxId], ['Contact person', c.contactPerson], ['Phone', c.phone], ['Email', c.email], ['Partner in charge', c.managerName], ['People with access', accessNames.join(', ')]]
-      : [['NTN', c.ntn], ['STRN', c.strn], ['CNIC', c.cnic], ['Contact person', c.contactPerson], ['Phone', c.phone], ['Email', c.email], ['Partner in charge', c.managerName], ['Staff', staffNames.join(', ')]];
+      : [['NTN', c.ntn], ['STRN', c.strn], ['CNIC', c.cnic], ['Authorized capital', money(c.authorizedCapital)], ['Paid-up capital', money(c.paidUpCapital)], ['Contact person', c.contactPerson], ['Phone', c.phone], ['Email', c.email], ['Partner in charge', c.managerName], ['Staff', staffNames.join(', ')]];
     for (const [k, v] of facts) {
       if (!v) continue; const d = el('div'); d.append(el('dt', null, k), el('dd', null, v)); dl.append(d);
     }
@@ -752,6 +756,7 @@
     const intl = clientDlgScope === 'intl';
     for (const id of ['#kNtnWrap', '#kStrnWrap', '#kCnicWrap']) $(id).hidden = intl;
     for (const id of ['#kCountryWrap', '#kTaxIdWrap']) $(id).hidden = !intl;
+    for (const id of ['#kAuthWrap', '#kPaidWrap']) $(id).hidden = intl;
     $('#kStaffLbl').textContent = intl ? 'People who can see this client' : 'Staff working on this client';
     const type = $('#kType'); type.replaceChildren(); for (const t of state.config.entityTypes || []) opt(type, t, t);
     const owner = state.me.role === 'owner';
@@ -761,7 +766,7 @@
     if (c) {
       $('#kName').value = c.name; $('#kCode').value = c.code; type.value = c.entityType; $('#kNtn').value = c.ntn; $('#kStrn').value = c.strn; $('#kCnic').value = c.cnic;
       $('#kContact').value = c.contactPerson; $('#kPhone').value = c.phone; $('#kEmail').value = c.email; $('#kNotes').value = c.notes; mgr.value = c.managerId ?? ''; $('#kActive').checked = c.active;
-      $('#kCountry').value = c.country; $('#kTaxId').value = c.taxId;
+      $('#kCountry').value = c.country; $('#kTaxId').value = c.taxId; $('#kAuth').value = c.authorizedCapital; $('#kPaid').value = c.paidUpCapital;
     } else type.value = 'Company';
     if (intl) { accessChecks(c ? c.accessIds : (state.me.role === 'partner' ? [state.me.id] : [])); mgr.onchange = null; }
     else {
@@ -776,7 +781,7 @@
     e.preventDefault(); showErr('#clientError');
     const body = { name: $('#kName').value.trim(), code: $('#kCode').value.trim(), entityType: $('#kType').value, ntn: $('#kNtn').value.trim(), strn: $('#kStrn').value.trim(),
       cnic: $('#kCnic').value.trim(), contactPerson: $('#kContact').value.trim(), phone: $('#kPhone').value.trim(), email: $('#kEmail').value.trim(), notes: $('#kNotes').value.trim(),
-      country: $('#kCountry').value.trim(), taxId: $('#kTaxId').value.trim() };
+      country: $('#kCountry').value.trim(), taxId: $('#kTaxId').value.trim(), authorizedCapital: $('#kAuth').value.trim(), paidUpCapital: $('#kPaid').value.trim() };
     const picked = [...document.querySelectorAll('#kStaff input:checked')].map(i => Number(i.value));
     if (clientDlgScope === 'intl') body.accessIds = picked; else body.staffIds = picked;
     if (!editClient) body.scope = clientDlgScope;
@@ -881,7 +886,8 @@
   }
   function openRule(r) {
     editRule = r || null; $('#ruleForm').reset(); showErr('#ruleError');
-    fillCats($('#rCat')); fillClients($('#rClient'), r?.clientId); fillPeople($('#rWho')); suggestPerson($('#rClient'), $('#rWho'));
+    fillCats($('#rCat')); fillClients($('#rClient'), r?.clientId); $('#rWhoSearch').value = '';
+    renderWho(r?.clientId ? (clientById(r.clientId)?.scope === 'intl' ? 'intl' : 'local') : null, r ? r.assigneeIds : [], 'r'); suggestPerson($('#rClient'), 'r');
     fillPartnerChecks($('#rPartners'), r ? r.partnerIds : []);
     const mSel = $('#rMonth'); mSel.replaceChildren(); MONTHS.forEach((m, i) => opt(mSel, i + 1, m));
     const box = $('#rMonths'); box.replaceChildren();
@@ -890,7 +896,7 @@
     for (const p of PRESETS) pre.append(btn(p.label, '', () => applyPreset(p)));
     pre.hidden = !!r;
     if (r) {
-      $('#rTitle').value = r.title; $('#rCat').value = r.categoryId ?? ''; $('#rClient').value = r.clientId ?? ''; $('#rWho').value = String(r.assigneeId);
+      $('#rTitle').value = r.title; $('#rCat').value = r.categoryId ?? ''; $('#rClient').value = r.clientId ?? '';
       $('#rFreq').value = r.frequency; $('#rDay').value = r.dueDay; $('#rMonth').value = r.dueMonth || 1; $('#rLead').value = r.leadDays; $('#rPri').value = r.priority; $('#rNotes').value = r.notes;
       r.months.forEach(m => { const c = $('#rm-' + m); if (c) c.checked = true; });
     } else { $('#rPri').value = 'high'; [1, 4, 7, 10].forEach(m => $('#rm-' + m).checked = true); }
@@ -911,9 +917,9 @@
   $('#ruleForm').addEventListener('submit', async e => {
     e.preventDefault(); showErr('#ruleError');
     const body = { title: $('#rTitle').value.trim(), categoryId: $('#rCat').value ? Number($('#rCat').value) : null, clientId: $('#rClient').value ? Number($('#rClient').value) : null,
-      assigneeId: Number($('#rWho').value), frequency: $('#rFreq').value, dueDay: Number($('#rDay').value), dueMonth: Number($('#rMonth').value),
+      assigneeIds: getWho('r'), frequency: $('#rFreq').value, dueDay: Number($('#rDay').value), dueMonth: Number($('#rMonth').value),
       partnerIds: checkedIds($('#rPartners')), months: [...document.querySelectorAll('#rMonths input:checked')].map(i => Number(i.value)), leadDays: Number($('#rLead').value), priority: $('#rPri').value, notes: $('#rNotes').value.trim() };
-    if (!body.assigneeId) return showErr('#ruleError', 'Choose who does this task.');
+    if (!body.assigneeIds.length) return showErr('#ruleError', 'Tick at least one person under Assign to.');
     const b = $('#ruleSave'); b.disabled = true;
     try {
       const res = editRule ? await api('PATCH', '/api/recurring/' + editRule.id, body) : await api('POST', '/api/recurring', body);
@@ -1083,6 +1089,121 @@
     e.preventDefault(); showErr('#resetError');
     try { await api('PATCH', '/api/users/' + resetUser.id, { password: $('#rPass').value }); $('#resetDlg').close(); toast('Password reset for ' + resetUser.name); }
     catch (err) { showErr('#resetError', err.message); }
+  });
+
+  /* ---------- import recurring tasks from Excel / CSV ---------- */
+  // Reads the first sheet of an .xlsx file in the browser (an .xlsx is a zip of XML files), no library needed.
+  async function readXlsx(buf) {
+    const dv = new DataView(buf), u8 = new Uint8Array(buf);
+    let eocd = -1;
+    for (let i = u8.length - 22; i >= Math.max(0, u8.length - 65557); i--) if (dv.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
+    if (eocd < 0) throw new Error('This file is not a valid Excel (.xlsx) file.');
+    const files = {}; let p = dv.getUint32(eocd + 16, true);
+    for (let k = 0, n = dv.getUint16(eocd + 10, true); k < n && dv.getUint32(p, true) === 0x02014b50; k++) {
+      const nlen = dv.getUint16(p + 28, true), elen = dv.getUint16(p + 30, true), clen = dv.getUint16(p + 32, true);
+      files[new TextDecoder().decode(u8.subarray(p + 46, p + 46 + nlen))] = { method: dv.getUint16(p + 10, true), size: dv.getUint32(p + 20, true), off: dv.getUint32(p + 42, true) };
+      p += 46 + nlen + elen + clen;
+    }
+    const text = async name => {
+      const f = files[name]; if (!f) return null;
+      const start = f.off + 30 + dv.getUint16(f.off + 26, true) + dv.getUint16(f.off + 28, true);
+      const data = u8.subarray(start, start + f.size);
+      if (f.method === 0) return new TextDecoder().decode(data);
+      if (typeof DecompressionStream === 'undefined') throw new Error('This browser cannot read Excel files. Save the sheet as CSV and upload that instead.');
+      return new Response(new Blob([data]).stream().pipeThrough(new DecompressionStream('deflate-raw'))).text();
+    };
+    const xml = s => new DOMParser().parseFromString(s, 'application/xml');
+    const shared = []; const ss = await text('xl/sharedStrings.xml');
+    if (ss) for (const si of xml(ss).getElementsByTagName('si')) shared.push([...si.getElementsByTagName('t')].map(t => t.textContent).join(''));
+    let sheet = 'xl/worksheets/sheet1.xml';
+    const wb = await text('xl/workbook.xml'), rels = await text('xl/_rels/workbook.xml.rels');
+    if (wb && rels) {
+      const first = xml(wb).getElementsByTagName('sheet')[0]; const rid = first && first.getAttribute('r:id');
+      const rel = [...xml(rels).getElementsByTagName('Relationship')].find(r => r.getAttribute('Id') === rid);
+      if (rel) { const t = rel.getAttribute('Target'); sheet = t.startsWith('/') ? t.slice(1) : 'xl/' + t.replace(/^\.\//, ''); }
+    }
+    const sx = await text(sheet); if (!sx) throw new Error('Could not find a sheet in this file.');
+    const col = ref => [...ref.replace(/\d+/g, '')].reduce((n, ch) => n * 26 + ch.charCodeAt(0) - 64, 0) - 1;
+    const rows = [];
+    for (const row of xml(sx).getElementsByTagName('row')) {
+      const vals = [];
+      for (const c of row.getElementsByTagName('c')) {
+        const t = c.getAttribute('t'), v = c.getElementsByTagName('v')[0]?.textContent ?? '';
+        vals[col(c.getAttribute('r') || 'A')] = t === 's' ? (shared[Number(v)] ?? '') : t === 'inlineStr' ? [...c.getElementsByTagName('t')].map(x => x.textContent).join('') : v;
+      }
+      rows.push({ line: Number(row.getAttribute('r')) || rows.length + 1, vals });
+    }
+    return rows;
+  }
+  function readCsv(textIn) {
+    const rows = []; let row = [], cell = '', quoted = false; const t = textIn.replace(/^﻿/, '');
+    for (let i = 0; i < t.length; i++) {
+      const ch = t[i];
+      if (quoted) { if (ch === '"' && t[i + 1] === '"') { cell += '"'; i++; } else if (ch === '"') quoted = false; else cell += ch; }
+      else if (ch === '"') quoted = true;
+      else if (ch === ',') { row.push(cell); cell = ''; }
+      else if (ch === '\n' || ch === '\r') { if (ch === '\r' && t[i + 1] === '\n') i++; row.push(cell); rows.push({ line: rows.length + 1, vals: row }); row = []; cell = ''; }
+      else cell += ch;
+    }
+    if (cell || row.length) { row.push(cell); rows.push({ line: rows.length + 1, vals: row }); }
+    return rows;
+  }
+  // Match the header row by its column names, wherever it sits in the sheet
+  const COLS = [['title', /^task( name)?$/], ['client', /^client( name)?$/], ['authorizedCapital', /^authori[sz]ed capital/], ['paidUpCapital', /^paid[- ]?up capital/],
+    ['assignTo', /^assign(ed)? to/], ['partners', /^partners?( involved)?$/], ['category', /^(task )?category/], ['repeat', /^repeats?$/], ['dueDay', /^due on day/],
+    ['dueMonth', /^due in month/], ['leadDays', /^add to board|days before/], ['priority', /^priority/], ['instructions', /^(instructions|notes)/]];
+  function sheetToRows(raw) {
+    const h = raw.findIndex(r => r.vals.some(v => /^task( name)?$/i.test(String(v ?? '').trim())));
+    if (h < 0) throw new Error('Could not find the header row. The sheet needs a "Task Name" column.');
+    const map = {};
+    raw[h].vals.forEach((v, i) => { const k = String(v ?? '').trim().toLowerCase(); const m = COLS.find(([, re]) => re.test(k)); if (m && !(m[0] in map)) map[m[0]] = i; });
+    for (const need of ['client', 'assignTo', 'repeat', 'dueDay']) if (!(need in map)) throw new Error(`The sheet is missing the column for ${need === 'assignTo' ? 'Assign To' : need === 'dueDay' ? 'Due on Day' : need[0].toUpperCase() + need.slice(1)}.`);
+    return raw.slice(h + 1).filter(r => r.vals.some(v => String(v ?? '').trim())).map(r => {
+      const o = { line: r.line }; for (const [k, i] of Object.entries(map)) o[k] = String(r.vals[i] ?? '').trim(); return o;
+    });
+  }
+  let importRows = null;
+  function showImport(res) {
+    const s = res.summary, sum = $('#importSummary'); sum.replaceChildren(); sum.hidden = false;
+    const line = (n, label, cls) => { if (!n) return; const d = el('span', 'imp-pill ' + cls); d.append(el('b', null, String(n)), document.createTextNode(' ' + label)); sum.append(d); };
+    line(s.ok, s.ok === 1 ? 'recurring task ready' : 'recurring tasks ready', 'ok'); line(s.skip, 'skipped', 'skip'); line(s.error, s.error === 1 ? 'row has a problem' : 'rows have a problem', 'err');
+    line(s.newClients, s.newClients === 1 ? 'new client will be added' : 'new clients will be added', 'info'); line(s.newCategories, 'new categories', 'info');
+    const tb = $('#importRows'); tb.replaceChildren();
+    const order = { error: 0, skip: 1, ok: 2 };
+    for (const r of [...res.results].sort((a, b) => order[a.status] - order[b.status] || a.line - b.line)) {
+      const tr = el('tr', 'imp-' + r.status);
+      tr.append(el('td', null, String(r.line)), el('td', null, r.title || '—'), el('td', null, r.client || '—'));
+      const td = el('td'); td.append(el('span', 'st-pill imp-' + r.status, { ok: 'Ready', skip: 'Skipped', error: 'Problem' }[r.status]));
+      for (const m of [...r.errors, ...r.notes]) td.append(el('small', null, m));
+      tr.append(td); tb.append(tr);
+    }
+    $('#importTableWrap').hidden = false;
+    $('#importGo').disabled = !s.ok;
+    $('#importGo').textContent = s.ok ? `Import ${s.ok} recurring task${s.ok === 1 ? '' : 's'}` : 'Nothing to import';
+  }
+  $('#importRulesBtn').onclick = () => {
+    $('#importForm').reset(); importRows = null; showErr('#importError');
+    $('#importSummary').hidden = true; $('#importTableWrap').hidden = true; $('#importGo').disabled = true; $('#importGo').textContent = 'Import';
+    $('#importDlg').showModal();
+  };
+  $('#importFile').addEventListener('change', async () => {
+    const f = $('#importFile').files[0]; showErr('#importError'); $('#importGo').disabled = true; importRows = null;
+    if (!f) return;
+    try {
+      const raw = /\.csv$/i.test(f.name) ? readCsv(await f.text()) : await readXlsx(await f.arrayBuffer());
+      importRows = sheetToRows(raw);
+      if (!importRows.length) throw new Error('The sheet has a header row but no tasks under it.');
+      showImport(await api('POST', '/api/recurring/import', { rows: importRows, commit: false }));
+    } catch (err) { importRows = null; $('#importSummary').hidden = true; $('#importTableWrap').hidden = true; showErr('#importError', err.message); }
+  });
+  $('#importForm').addEventListener('submit', async e => {
+    e.preventDefault(); if (!importRows) return;
+    const b = $('#importGo'); b.disabled = true; b.textContent = 'Importing…';
+    try {
+      const res = await api('POST', '/api/recurring/import', { rows: importRows, commit: true });
+      $('#importDlg').close(); await refresh();
+      toast(`Imported ${res.imported} recurring task${res.imported === 1 ? '' : 's'}` + (res.tasksCreated ? `. ${res.tasksCreated} added to the task board now.` : '.'));
+    } catch (err) { showErr('#importError', err.message); b.disabled = false; b.textContent = 'Try again'; }
   });
 
   document.querySelectorAll('dialog [data-close]').forEach(b => b.onclick = () => b.closest('dialog').close());

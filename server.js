@@ -178,6 +178,11 @@ CREATE TABLE IF NOT EXISTS recurring (
   if (!cols.includes('scope')) db.exec("ALTER TABLE clients ADD COLUMN scope TEXT NOT NULL DEFAULT 'local'");
   if (!cols.includes('country')) db.exec("ALTER TABLE clients ADD COLUMN country TEXT NOT NULL DEFAULT ''");
   if (!cols.includes('tax_id')) db.exec("ALTER TABLE clients ADD COLUMN tax_id TEXT NOT NULL DEFAULT ''");
+  // Version 2.12: company capital, and recurring tasks for several people
+  if (!cols.includes('authorized_capital')) db.exec("ALTER TABLE clients ADD COLUMN authorized_capital TEXT NOT NULL DEFAULT ''");
+  if (!cols.includes('paid_up_capital')) db.exec("ALTER TABLE clients ADD COLUMN paid_up_capital TEXT NOT NULL DEFAULT ''");
+  const rc = db.prepare('PRAGMA table_info(recurring)').all().map(c => c.name);
+  if (!rc.includes('assignee_ids')) { db.exec("ALTER TABLE recurring ADD COLUMN assignee_ids TEXT NOT NULL DEFAULT ''"); db.exec('UPDATE recurring SET assignee_ids = CAST(assignee_id AS TEXT)'); }
 }
 // Version 2.10: staff work on local clients, international clients, or both
 if (!db.prepare('PRAGMA table_info(users)').all().some(c => c.name === 'work_area')) {
@@ -607,7 +612,7 @@ route('DELETE', '/api/users/:id', true, async (req, res, body, me, params) => {
   const n = sql => db.prepare(sql).get(target.id).n;
   // Personal tasks are never handed over; they stay private and hidden.
   const openTasks = n("SELECT COUNT(*) n FROM task_assignees ta JOIN tasks t ON t.id = ta.task_id WHERE ta.user_id = ? AND t.status <> 'done' AND t.visibility = 'business'");
-  const rules = n('SELECT COUNT(*) n FROM recurring WHERE assignee_id = ?');
+  const rules = db.prepare('SELECT * FROM recurring').all().filter(x => ruleAssignees(x).includes(target.id)).length;
   const managed = n('SELECT COUNT(*) n FROM clients WHERE manager_id = ?');
   const assigned = n('SELECT COUNT(*) n FROM client_staff WHERE user_id = ?');
   let to = null;
@@ -623,7 +628,11 @@ route('DELETE', '/api/users/:id', true, async (req, res, body, me, params) => {
       db.prepare("INSERT OR IGNORE INTO task_assignees (task_id, user_id) SELECT ta.task_id, ? FROM task_assignees ta JOIN tasks t ON t.id = ta.task_id WHERE ta.user_id = ? AND t.status <> 'done' AND t.visibility = 'business'").run(to.id, target.id);
       db.prepare("DELETE FROM task_assignees WHERE user_id = ? AND task_id IN (SELECT id FROM tasks WHERE status <> 'done' AND visibility = 'business')").run(target.id);
       db.prepare("UPDATE tasks SET assignee_id = ?, updated_at = ?, updated_by = ? WHERE assignee_id = ? AND status <> 'done' AND visibility = 'business'").run(to.id, Date.now(), me.id, target.id);
-      db.prepare('UPDATE recurring SET assignee_id = ? WHERE assignee_id = ?').run(to.id, target.id);
+      for (const x of db.prepare('SELECT * FROM recurring').all()) {
+        const ids = ruleAssignees(x); if (!ids.includes(target.id)) continue;
+        const next = [...new Set(ids.map(i => i === target.id ? to.id : i))];
+        db.prepare('UPDATE recurring SET assignee_id = ?, assignee_ids = ? WHERE id = ?').run(next[0], next.join(','), x.id);
+      }
       if (managed) db.prepare('UPDATE clients SET manager_id = ?, updated_at = ? WHERE manager_id = ?').run(to.id, Date.now(), target.id);
       if (to.role === 'staff') db.prepare('INSERT OR IGNORE INTO client_staff (client_id, user_id) SELECT client_id, ? FROM client_staff WHERE user_id = ?').run(to.id, target.id);
       if (to.role === 'partner') {
@@ -671,6 +680,7 @@ function clientOut(c, me) {
     contactPerson: c.contact_person, phone: c.phone, email: c.email, notes: c.notes, managerId: c.manager_id,
     managerName: c.manager_name || '', active: !!c.active, staffIds, logins, canEdit: canEditClient(me, c),
     scope: c.scope === 'intl' ? 'intl' : 'local', country: c.country || '', taxId: c.tax_id || '',
+    authorizedCapital: c.authorized_capital || '', paidUpCapital: c.paid_up_capital || '',
     accessIds: c.scope === 'intl' ? db.prepare('SELECT user_id FROM client_access WHERE client_id = ?').all(c.id).map(r => r.user_id) : [],
   };
 }
@@ -688,7 +698,8 @@ function clientFields(body, me, existing) {
   const f = {};
   const map = { name: ['name', 120, 'Client name'], code: ['code', 30, 'Client code'], ntn: ['ntn', 30, 'NTN'], strn: ['strn', 30, 'STRN'], cnic: ['cnic', 20, 'CNIC'],
     contactPerson: ['contact_person', 80, 'Contact person'], phone: ['phone', 40, 'Phone'], email: ['email', 120, 'Email'], notes: ['notes', 2000, 'Notes'],
-    country: ['country', 60, 'Country'], taxId: ['tax_id', 40, 'Tax ID'] };
+    country: ['country', 60, 'Country'], taxId: ['tax_id', 40, 'Tax ID'],
+    authorizedCapital: ['authorized_capital', 30, 'Authorized capital'], paidUpCapital: ['paid_up_capital', 30, 'Paid-up capital'] };
   for (const [k, [col, max, label]] of Object.entries(map)) if (k in body) f[col] = str(body[k], max, label);
   if ('name' in f && !f.name) throw bad('Enter the client name.');
   if ('entityType' in body) { if (!ENTITY_TYPES.includes(body.entityType)) throw bad('Choose a client type.'); f.entity_type = body.entityType; }
@@ -978,6 +989,7 @@ function periodLabel(r, y, m) {
     let sy = ey, sm = em - 2; if (sm < 1) { sm += 12; sy--; }
     return { period: `${ey}-Q${pad(em)}`, label: `${MON[sm - 1]}–${MON[em - 1]} ${ey}` };
   }
+  if (r._cat && !/income tax/i.test(r._cat)) return { period: `Y${y}`, label: String(y) }; // e.g. Annual AGM — Client — 2026
   const ty = m >= 7 ? y : y - 1;
   return { period: `TY${ty}`, label: `Tax Year ${ty}` };
 }
@@ -985,8 +997,9 @@ function generateRecurring(onlyId) {
   const today = localToday(); let made = 0;
   const rules = onlyId ? db.prepare('SELECT * FROM recurring WHERE id = ? AND active = 1').all(onlyId) : db.prepare('SELECT * FROM recurring WHERE active = 1').all();
   for (const r of rules) {
-    const assignee = db.prepare('SELECT * FROM users WHERE id = ? AND active = 1').get(r.assignee_id);
-    if (!assignee) continue;
+    const people = ruleAssignees(r).filter(id => db.prepare('SELECT 1 FROM users WHERE id = ? AND active = 1 AND deleted = 0').get(id));
+    if (!people.length) continue;
+    r._cat = r.category_id ? (db.prepare('SELECT name FROM categories WHERE id = ?').get(r.category_id)?.name || '') : '';
     const client = r.client_id ? db.prepare('SELECT * FROM clients WHERE id = ?').get(r.client_id) : null;
     if (client && !client.active) continue;
     const from = r.last_due || addDays(today, -1);
@@ -997,11 +1010,11 @@ function generateRecurring(onlyId) {
         const title = [r.title, client?.name, d.label].filter(Boolean).join(' — ');
         const now = Date.now();
         const ins = db.prepare(`INSERT INTO tasks (title,notes,priority,due,assignee_id,created_by,created_at,updated_at,updated_by,category_id,client_id,recurring_id,period)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(title, r.notes, r.priority, d.due, r.assignee_id, r.created_by, now, now, r.created_by, r.category_id, r.client_id, r.id, d.period);
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(title, r.notes, r.priority, d.due, people[0], r.created_by, now, now, r.created_by, r.category_id, r.client_id, r.id, d.period);
         const pids = (r.partner_ids || '').split(',').filter(Boolean).map(Number)
           .filter(id => db.prepare("SELECT 1 FROM users WHERE id = ? AND role IN ('partner','owner') AND active = 1 AND deleted = 0").get(id));
         setTaskPartners(Number(ins.lastInsertRowid), pids);
-        setTaskAssignees(Number(ins.lastInsertRowid), [r.assignee_id]);
+        setTaskAssignees(Number(ins.lastInsertRowid), people);
         made++;
       }
       db.prepare('UPDATE recurring SET last_due = ? WHERE id = ?').run(list[list.length - 1].due, r.id);
@@ -1009,11 +1022,13 @@ function generateRecurring(onlyId) {
   }
   return made;
 }
+const ruleAssignees = r => { const ids = (r.assignee_ids || '').split(',').filter(Boolean).map(Number); return ids.length ? ids : [r.assignee_id]; };
 function nextDue(r) { const t = localToday(); const n = dueDates(r, r.last_due && r.last_due > t ? r.last_due : addDays(t, -1), addDays(t, 400)); return n[0]?.due || ''; }
 function ruleOut(r, me) {
   return {
     id: r.id, title: r.title, categoryId: r.category_id, categoryName: r.category_name || '', clientId: r.client_id, clientName: r.client_name || '',
-    assigneeId: r.assignee_id, assigneeName: r.assignee_name, frequency: r.frequency, dueDay: r.due_day, dueMonth: r.due_month,
+    assigneeId: r.assignee_id, assigneeIds: ruleAssignees(r),
+    assigneeName: ruleAssignees(r).map(id => db.prepare('SELECT name FROM users WHERE id = ?').get(id)?.name).filter(Boolean).join(', '), frequency: r.frequency, dueDay: r.due_day, dueMonth: r.due_month,
     months: r.months ? r.months.split(',').map(Number) : [], leadDays: r.lead_days, priority: r.priority, notes: r.notes, active: !!r.active,
     lastDue: r.last_due, nextDue: r.active ? nextDue(r) : '', createdBy: r.created_by, canEdit: canEditRule(me, r),
     partnerIds: (r.partner_ids || '').split(',').filter(Boolean).map(Number),
@@ -1024,20 +1039,26 @@ const RULE_SELECT = `SELECT r.*, k.name category_name, c.name client_name, a.nam
 function canSeeRule(me, r) {
   if (intlHidden(me, r.client_id)) return false;
   if (me.role === 'owner') return true;
-  if (r.created_by === me.id || r.assignee_id === me.id) return true;
-  if (me.role === 'partner') return teamIds(me).includes(r.assignee_id) || (r.partner_ids || '').split(',').map(Number).includes(me.id);
+  const ids = ruleAssignees(r);
+  if (r.created_by === me.id || ids.includes(me.id)) return true;
+  if (me.role === 'partner') { const team = teamIds(me); return ids.some(id => team.includes(id)) || (r.partner_ids || '').split(',').map(Number).includes(me.id); }
   return false;
 }
 function canEditRule(me, r) {
   if (me.role === 'owner' || (me.role !== 'staff' && r.created_by === me.id)) return true;
-  return me.role === 'partner' && r.assignee_id !== me.id && teamIds(me).includes(r.assignee_id);
+  if (me.role !== 'partner' || ruleAssignees(r).includes(me.id)) return false;
+  const team = teamIds(me); return ruleAssignees(r).some(id => team.includes(id));
 }
 function ruleFields(body, me, cur) {
   const f = {};
   if ('title' in body) { f.title = str(body.title, 120, 'Task name'); if (!f.title) throw bad('Enter the task name.'); }
   if ('categoryId' in body) f.category_id = checkCategory(body.categoryId);
   if ('clientId' in body) f.client_id = (cur && intOrNull(body.clientId) === cur.client_id) ? cur.client_id : checkClient(me, body.clientId);
-  if ('assigneeId' in body) f.assignee_id = checkAssignee(me, body.assigneeId).id;
+  if ('assigneeIds' in body || 'assigneeId' in body) {
+    const cur0 = cur ? ruleAssignees(cur) : [];
+    const ids = readAssignees(body).map(id => cur0.includes(id) ? id : checkAssignee(me, id).id);
+    f.assignee_id = ids[0]; f.assignee_ids = ids.join(',');
+  }
   if ('frequency' in body) { if (!['monthly', 'quarterly', 'annual'].includes(body.frequency)) throw bad('Choose how often it repeats.'); f.frequency = body.frequency; }
   if ('dueDay' in body) { const d = Number(body.dueDay); if (!Number.isInteger(d) || d < 1 || d > 31) throw bad('Due day must be between 1 and 31.'); f.due_day = d; }
   if ('dueMonth' in body) { const d = intOrNull(body.dueMonth); if (d !== null && (!Number.isInteger(d) || d < 1 || d > 12)) throw bad('Choose the due month.'); f.due_month = d; }
@@ -1050,10 +1071,12 @@ function ruleFields(body, me, cur) {
   if ('notes' in body) f.notes = str(body.notes, 2000, 'Instructions');
   if ('active' in body) f.active = body.active ? 1 : 0;
   if ('partnerIds' in body) f.partner_ids = checkPartners(body.partnerIds, null).join(',');
-  if ('clientId' in body || 'assigneeId' in body || 'partnerIds' in body)
+  const people = 'assignee_ids' in f ? f.assignee_ids.split(',').map(Number) : cur ? ruleAssignees(cur) : [];
+  const changed = 'clientId' in body || 'assigneeId' in body || 'assigneeIds' in body;
+  if (changed || 'partnerIds' in body)
     checkIntlPeople('client_id' in f ? f.client_id : cur?.client_id,
-      [f.assignee_id ?? cur?.assignee_id, ...(('partner_ids' in f ? f.partner_ids : cur?.partner_ids || '').split(',').filter(Boolean).map(Number))]);
-  if ('clientId' in body || 'assigneeId' in body) checkWorkArea('client_id' in f ? f.client_id : cur?.client_id, [f.assignee_id ?? cur?.assignee_id]);
+      [...people, ...(('partner_ids' in f ? f.partner_ids : cur?.partner_ids || '').split(',').filter(Boolean).map(Number))]);
+  if (changed) checkWorkArea('client_id' in f ? f.client_id : cur?.client_id, people);
   const freq = f.frequency ?? cur?.frequency;
   if (freq === 'annual' && !(f.due_month ?? cur?.due_month)) throw bad('Choose the month the yearly task is due.');
   if (freq === 'quarterly' && !(f.months ?? cur?.months)) throw bad('Choose the months the quarterly task is due.');
@@ -1066,13 +1089,127 @@ route('GET', '/api/recurring', true, async (req, res, body, me) => {
 });
 route('POST', '/api/recurring', true, async (req, res, body, me) => {
   if (me.role === 'staff') throw new HttpError(403, 'Staff cannot set up recurring tasks.');
-  for (const k of ['title', 'assigneeId', 'frequency', 'dueDay']) if (!(k in body)) throw bad('Fill in the task name, person, frequency and due day.');
+  if (!('title' in body) || !('frequency' in body) || !('dueDay' in body) || !('assigneeId' in body || 'assigneeIds' in body)) throw bad('Fill in the task name, person, frequency and due day.');
   const f = ruleFields(body, me, null);
   const cols = Object.keys(f);
   const r = db.prepare(`INSERT INTO recurring (${cols.join(',')}, created_by, created_at) VALUES (${cols.map(() => '?').join(',')}, ?, ?)`).run(...cols.map(k => f[k]), me.id, Date.now());
   const id = Number(r.lastInsertRowid);
   const made = generateRecurring(id);
   send(res, 201, { rule: ruleOut(db.prepare(RULE_SELECT + ' WHERE r.id = ?').get(id), me), created: made });
+});
+/* ---- import recurring tasks from a spreadsheet (owner) ----
+ * The page reads the file and sends rows of text. With commit=false nothing is saved: each row comes back
+ * marked ok / skip / error with notes, so the owner sees exactly what will happen before importing. */
+const norm = s => String(s ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
+const MONTH_NAMES = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
+function monthOf(v) {
+  const s = norm(v); if (!s) return null;
+  if (/^\d+$/.test(s)) { const n = Number(s); return n >= 1 && n <= 12 ? n : null; }
+  const i = MONTH_NAMES.findIndex(m => m.startsWith(s.slice(0, 3))); return i >= 0 ? i + 1 : null;
+}
+const splitNames = v => String(v ?? '').split(/[,;\/&]|\band\b/i).map(s => s.trim()).filter(Boolean);
+const cleanMoney = v => { const s = String(v ?? '').replace(/[, ]/g, '').trim(); return /^\d+(\.\d+)?$/.test(s) ? s : String(v ?? '').trim().slice(0, 30); };
+route('POST', '/api/recurring/import', true, async (req, res, body, me) => {
+  if (me.role !== 'owner') throw new HttpError(403, 'Only the owner can import recurring tasks.');
+  if (!Array.isArray(body.rows) || !body.rows.length) throw bad('The file has no rows to import.');
+  if (body.rows.length > 2000) throw bad('Import up to 2,000 rows at a time.');
+  const users = db.prepare('SELECT * FROM users WHERE deleted = 0 AND active = 1').all();
+  const findUser = n => users.filter(u => norm(u.name) === norm(n) || norm(u.username) === norm(n));
+  const cats = new Map(db.prepare('SELECT id, name FROM categories').all().map(c => [norm(c.name), c]));
+  const clients = new Map(db.prepare('SELECT * FROM clients').all().map(c => [norm(c.name), c]));
+  const existing = new Set(db.prepare('SELECT title, client_id FROM recurring').all().map(x => norm(x.title) + '|' + x.client_id));
+  const seen = new Set(); const newClients = new Map(); const newCats = new Map(); const plan = [];
+  const results = body.rows.map((row, i) => {
+    const errors = [], notes = []; const line = Number(row.line) || i + 1;
+    let title = String(row.title ?? '').replace(/\s+/g, ' ').trim().slice(0, 120);
+    const freqRaw = norm(row.repeat);
+    const frequency = /^(year|annual)/.test(freqRaw) ? 'annual' : /^month/.test(freqRaw) ? 'monthly' : /^quarter/.test(freqRaw) ? 'quarterly' : null;
+    if (frequency === 'annual' && /\s(19|20)\d{2}$/.test(title)) { title = title.replace(/\s+(19|20)\d{2}$/, ''); notes.push('Year taken out of the name; each year\'s task shows its own year'); }
+    if (!title) errors.push('Task name is empty');
+    const clientName = String(row.client ?? '').replace(/\s+/g, ' ').trim().slice(0, 120);
+    if (!clientName) errors.push('Client name is empty');
+    if (!frequency) errors.push(`Repeat must be Monthly, Quarterly or Yearly (found "${row.repeat ?? ''}")`);
+    const dueDay = Number(row.dueDay); if (!Number.isInteger(dueDay) || dueDay < 1 || dueDay > 31) errors.push('Due on day must be 1–31');
+    let dueMonth = null, months = '';
+    if (frequency === 'annual') { dueMonth = monthOf(row.dueMonth); if (!dueMonth) errors.push('Due in month is missing or not a month'); }
+    if (frequency === 'quarterly') {
+      const ms = splitNames(row.dueMonth).map(monthOf).filter(Boolean);
+      months = (ms.length ? [...new Set(ms)].sort((a, b) => a - b) : [1, 4, 7, 10]).join(',');
+      if (!ms.length) notes.push('No months given; using Jan, Apr, Jul, Oct');
+    }
+    let leadDays = row.leadDays === '' || row.leadDays == null ? 10 : Number(row.leadDays);
+    if (!Number.isInteger(leadDays) || leadDays < 0 || leadDays > 60) { errors.push('Days before due must be 0–60'); leadDays = 10; }
+    const people = [];
+    const names = splitNames(row.assignTo); if (!names.length) errors.push('Assign to is empty');
+    for (const n of names) {
+      const m = findUser(n);
+      if (!m.length) errors.push(`No active person called "${n}" — add them on People first`);
+      else if (m.length > 1) errors.push(`More than one person is called "${n}"`);
+      else people.push(m[0].id);
+    }
+    const partners = [];
+    for (const n of splitNames(row.partners)) {
+      const m = findUser(n).filter(u => u.role === 'partner' || u.role === 'owner');
+      if (!m.length) errors.push(`No partner called "${n}"`); else partners.push(m[0].id);
+    }
+    let catId = null; const catName = String(row.category ?? '').trim();
+    if (catName) { const c = cats.get(norm(catName)); if (c) catId = c.id; else { newCats.set(norm(catName), catName.slice(0, 50)); notes.push(`New category "${catName}" will be added`); } }
+    const client = clients.get(norm(clientName));
+    if (clientName && !client && !newClients.has(norm(clientName))) notes.push('New client will be added');
+    if (client && client.scope === 'intl') {
+      try { checkIntlPeople(client.id, [...people, ...partners]); checkWorkArea(client.id, people); } catch (e) { errors.push(e.message); }
+    } else for (const uid of people) {
+      const u = users.find(x => x.id === uid); if (u.role === 'staff' && u.work_area === 'intl') errors.push(`${u.name} works on international clients only`);
+    }
+    const key = norm(title) + '|' + norm(clientName);
+    let status = errors.length ? 'error' : 'ok';
+    if (status === 'ok' && seen.has(key)) {
+      status = 'skip'; notes.push('Same task and client appear earlier in the file');
+      // keep any capital figures the earlier row left blank
+      const nc = newClients.get(norm(clientName)), pl = plan.find(x => x.clientKey === norm(clientName));
+      for (const [k, val] of [['authorized', cleanMoney(row.authorizedCapital)], ['paid', cleanMoney(row.paidUpCapital)]]) {
+        if (!val) continue;
+        if (nc && !nc[k]) { nc[k] = val; if (!notes.includes('Capital from this row is kept')) notes.push('Capital from this row is kept'); }
+        if (pl && !pl[k]) pl[k] = val;
+      }
+    }
+    if (status === 'ok' && client && existing.has(norm(title) + '|' + client.id)) { status = 'skip'; notes.push('Already set up in Recurring'); }
+    seen.add(key);
+    if (status === 'ok') {
+      if (!client && !newClients.has(norm(clientName))) newClients.set(norm(clientName), { name: clientName, authorized: cleanMoney(row.authorizedCapital), paid: cleanMoney(row.paidUpCapital) });
+      plan.push({ title, clientKey: norm(clientName), catKey: catId ? null : (catName ? norm(catName) : null), catId, people: [...new Set(people)], partners: [...new Set(partners)],
+        frequency, dueDay, dueMonth, months, leadDays, authorized: cleanMoney(row.authorizedCapital), paid: cleanMoney(row.paidUpCapital),
+        priority: ['high', 'medium', 'low'].includes(norm(row.priority)) ? norm(row.priority) : 'high', notes: String(row.instructions ?? '').trim().slice(0, 2000) });
+    }
+    return { line, title, client: clientName, status, errors, notes };
+  });
+  const summary = { ok: plan.length, skip: results.filter(r => r.status === 'skip').length, error: results.filter(r => r.status === 'error').length,
+    newClients: newClients.size, newCategories: newCats.size };
+  if (!body.commit) return send(res, 200, { results, summary });
+  if (!plan.length) throw bad('There is nothing to import. Fix the rows marked with a problem and try again.');
+  const ruleIds = tx(() => {
+    const now = Date.now();
+    for (const [k, name] of newCats) { const r = db.prepare('INSERT INTO categories (name) VALUES (?)').run(name); cats.set(k, { id: Number(r.lastInsertRowid), name }); }
+    for (const [k, c] of newClients) {
+      const r = db.prepare("INSERT INTO clients (name, entity_type, scope, authorized_capital, paid_up_capital, created_at, updated_at) VALUES (?, 'Company', 'local', ?, ?, ?, ?)").run(c.name, c.authorized, c.paid, now, now);
+      clients.set(k, { id: Number(r.lastInsertRowid), scope: 'local' });
+    }
+    const ids = [];
+    for (const p of plan) {
+      const client = clients.get(p.clientKey);
+      // fill in capital on existing clients when it was blank
+      if (p.authorized) db.prepare("UPDATE clients SET authorized_capital = ? WHERE id = ? AND authorized_capital = ''").run(p.authorized, client.id);
+      if (p.paid) db.prepare("UPDATE clients SET paid_up_capital = ? WHERE id = ? AND paid_up_capital = ''").run(p.paid, client.id);
+      const catId = p.catId ?? (p.catKey ? cats.get(p.catKey).id : null);
+      const r = db.prepare(`INSERT INTO recurring (title, category_id, client_id, assignee_id, assignee_ids, frequency, due_day, due_month, months, lead_days, priority, notes, partner_ids, created_by, created_at)
+                            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+        .run(p.title, catId, client.id, p.people[0], p.people.join(','), p.frequency, p.dueDay, p.dueMonth, p.months, p.leadDays, p.priority, p.notes, p.partners.join(','), me.id, now);
+      ids.push(Number(r.lastInsertRowid));
+    }
+    return ids;
+  });
+  let made = 0; for (const id of ruleIds) made += generateRecurring(id);
+  send(res, 200, { results, summary, imported: ruleIds.length, tasksCreated: made });
 });
 route('PATCH', '/api/recurring/:id', true, async (req, res, body, me, params) => {
   const cur = db.prepare(RULE_SELECT + ' WHERE r.id = ?').get(Number(params.id));

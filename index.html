@@ -137,7 +137,7 @@
     <section id="recurringPage" class="stack-lg" hidden>
       <div class="head">
         <div><h1>Recurring tasks</h1><p class="sub">Returns and filings that repeat. Each one is added to the task board automatically, a set number of days before it's due.</p></div>
-        <button class="primary" type="button" id="newRuleBtn">+ Add recurring task</button>
+        <div class="mini"><button type="button" id="importRulesBtn" hidden>Import from Excel</button><button class="primary" type="button" id="newRuleBtn">+ Add recurring task</button></div>
       </div>
       <div class="table-wrap"><table class="table" id="ruleTable">
         <thead><tr><th>Task</th><th>Client</th><th>Assigned to</th><th>Schedule</th><th>Next due</th><th></th></tr></thead>
@@ -214,6 +214,8 @@
       <label for="kNtn" id="kNtnWrap">NTN<input id="kNtn" maxlength="30"></label>
       <label for="kStrn" id="kStrnWrap">STRN<input id="kStrn" maxlength="30"></label>
       <label for="kCountry" id="kCountryWrap">Country<input id="kCountry" maxlength="60" placeholder="e.g. United Kingdom"></label>
+      <label for="kAuth" id="kAuthWrap">Authorized capital<input id="kAuth" maxlength="30" inputmode="numeric" placeholder="e.g. 10000000"></label>
+      <label for="kPaid" id="kPaidWrap">Paid-up capital<input id="kPaid" maxlength="30" inputmode="numeric" placeholder="e.g. 2500000"></label>
       <label for="kTaxId" id="kTaxIdWrap">Tax / registration no.<input id="kTaxId" maxlength="40" placeholder="e.g. UTR, EIN, VAT no."></label>
     </div>
     <div class="row3">
@@ -259,7 +261,11 @@
       <label for="rCat">Task category<select id="rCat"></select></label>
       <label for="rClient">Client<select id="rClient"></select></label>
     </div>
-    <label for="rWho">Assign to<select id="rWho" required></select></label>
+    <div class="field" id="rWhoWrap"><span class="flabel">Assign to <em class="req">(tick one or more)</em></span>
+      <input type="search" id="rWhoSearch" placeholder="Find a person" aria-label="Find a person to assign">
+      <div class="checks who-list" id="rWhoList" role="group" aria-label="Assign to"></div>
+      <p class="help" id="rWhoSel"></p>
+    </div>
     <div class="field" id="rPartnersWrap"><span class="flabel">Partners involved</span><div class="checks" id="rPartners"></div></div>
     <div class="row3">
       <label for="rFreq">Repeats<select id="rFreq"><option value="monthly">Monthly</option><option value="quarterly">Quarterly</option><option value="annual">Yearly</option></select></label>
@@ -308,6 +314,19 @@
     <p class="help">Their login stops working straight away and the login ID can be reused. Completed tasks stay in the records under their name. To stop someone signing in for a while, use Deactivate instead.</p>
     <p class="form-error" id="delError" role="alert" hidden></p>
     <div class="dlg-actions"><button type="button" class="ghost" data-close>Cancel</button><button class="primary danger-btn" type="submit" id="delSave">Delete employee</button></div>
+  </form>
+</dialog>
+
+<!-- Import recurring tasks -->
+<dialog id="importDlg" class="wide-dlg import-dlg">
+  <form id="importForm" class="stack" method="dialog" autocomplete="off">
+    <h2>Import recurring tasks</h2>
+    <p class="help">Upload an Excel (.xlsx) or CSV file with these columns: <b>Task Name, Client Name, Assign To, Partner, Category, Repeat, Due on Day, Due In Month, Add to board this many days before due</b>. Optional: Authorized Capital, Paid up Capital, Priority, Instructions. Several people go in one cell, separated by commas.</p>
+    <label for="importFile">File<input type="file" id="importFile" accept=".xlsx,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv"></label>
+    <div id="importSummary" class="import-summary" hidden></div>
+    <div class="table-wrap import-table" id="importTableWrap" hidden><table class="table"><thead><tr><th>Row</th><th>Task</th><th>Client</th><th>Result</th></tr></thead><tbody id="importRows"></tbody></table></div>
+    <p class="form-error" id="importError" role="alert" hidden></p>
+    <div class="dlg-actions"><button type="button" class="ghost" data-close>Cancel</button><button class="primary" type="submit" id="importGo" disabled>Import</button></div>
   </form>
 </dialog>
 

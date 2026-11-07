@@ -80,6 +80,11 @@ Each staff member has a **Works on** setting (Local, International, or Both) on 
 
 **Assign to** is a tick list: tick one or more people. A task given to several people is one shared task. Everyone on it sees it and can update its status and notes, and when anyone marks it Done it is done for all.
 
+## Importing recurring tasks from Excel
+
+On **Recurring**, the owner can use **Import from Excel** (.xlsx or .csv). Columns: Task Name, Client Name, Assign To, Partner, Category, Repeat (Monthly / Quarterly / Yearly), Due on Day, Due In Month, Add to board this many days before due. Optional: Authorized Capital, Paid up Capital, Priority, Instructions.
+Several people go in one cell separated by commas, and names must match the People page. The import shows a preview first. Rows with a problem are listed and left out. Missing clients and categories are created, and importing the same file again skips what is already set up.
+
 ## My feed and personal tasks
 
 The owner and partners have a **My feed** tab for their own to-dos. Each one is **Business** or **Personal**.

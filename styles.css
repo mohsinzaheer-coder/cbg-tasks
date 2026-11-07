@@ -308,3 +308,19 @@ button.stat.on{border-color:var(--gold);background:var(--gold-soft);box-shadow:i
 .who-list label{padding:5px 2px}
 .who-group{font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);padding:8px 0 2px}
 #tWhoSel{color:var(--text);font-weight:500}
+
+/* import */
+.import-dlg{width:min(900px,calc(100vw - 32px))}
+.import-summary{display:flex;flex-wrap:wrap;gap:8px}
+.imp-pill{border-radius:99px;padding:4px 12px;font-size:.9rem;background:var(--sunk)}
+.imp-pill.ok{background:var(--low-soft);color:var(--good)}
+.imp-pill.err{background:var(--late-soft);color:var(--late)}
+.imp-pill.skip{background:var(--gold-soft)}
+.import-table{max-height:44vh;overflow:auto}
+.import-table .table{min-width:640px;font-size:.9rem}
+.import-table td small{display:block;color:var(--muted);margin-top:3px}
+.import-table tr.imp-error td small{color:var(--late)}
+.st-pill.imp-ok{background:var(--low-soft);color:var(--good);border-color:var(--good)}
+.st-pill.imp-error{background:var(--late-soft);color:var(--late);border-color:var(--late)}
+.st-pill.imp-skip{background:var(--gold-soft);border-color:var(--gold)}
+#rWhoWrap{gap:6px}
