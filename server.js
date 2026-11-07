@@ -345,14 +345,14 @@ function canManageUser(me, target) {
   return false;
 }
 /* Clients this person may see
- *   local clients — owner and partners: all (partners edit the ones they are in charge of); staff: the ones assigned to them
+ *   local clients — owner, partners and staff who work on local clients: all (only the owner and the partner in charge edit)
  *   international clients — only the owner and the people listed on the client */
 function visibleClientIds(me) {
   if (me.role === 'owner') return null;
   const intl = db.prepare("SELECT ca.client_id id FROM client_access ca JOIN clients c ON c.id = ca.client_id WHERE ca.user_id = ? AND c.scope = 'intl'").all(me.id).map(r => r.id);
-  const local = me.role === 'partner'
-    ? db.prepare("SELECT id FROM clients WHERE scope <> 'intl'").all().map(r => r.id)
-    : db.prepare("SELECT cs.client_id id FROM client_staff cs JOIN clients c ON c.id = cs.client_id WHERE cs.user_id = ? AND c.scope <> 'intl'").all(me.id).map(r => r.id);
+  // Every partner, and every staff member whose "Works on" covers local work, sees all local clients (read-only unless in charge)
+  const seesLocal = me.role === 'partner' || (me.role === 'staff' && (me.work_area || 'local') !== 'intl');
+  const local = seesLocal ? db.prepare("SELECT id FROM clients WHERE scope <> 'intl'").all().map(r => r.id) : [];
   return [...new Set([...local, ...intl])];
 }
 // Tasks and recurring tasks for an international client are hidden from anyone not listed on that client

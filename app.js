@@ -626,7 +626,7 @@
     $('#clientsTitle').textContent = intl ? 'International clients' : 'Clients';
     $('#clientsSub').textContent = intl
       ? (state.me.role === 'owner' ? 'Each international client is visible only to you and the partners and staff listed on it.' : 'International clients you have been given access to. Only the people listed on each client can see it.')
-      : ({ owner: 'All clients, their registrations and portal logins.', partner: 'All clients and their portal logins. You can edit the clients you are in charge of.', staff: 'Clients you work on.' }[state.me.role] || '');
+      : ({ owner: 'All clients, their registrations and portal logins.', partner: 'All clients and their portal logins. You can edit the clients you are in charge of.', staff: 'All clients and their portal logins (view only). Each time you show a password it is recorded.' }[state.me.role] || '');
     $('#newClientBtn').textContent = intl ? '+ Add international client' : '+ Add client';
     $('#importClientsBtn').hidden = intl || state.me.role !== 'owner';
     $('#cSearch').placeholder = intl ? 'Name, code, country or tax ID' : 'Name, code, NTN or STRN';
