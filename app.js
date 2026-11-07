@@ -5,7 +5,7 @@
   const PRI = { high: 0, medium: 1, low: 2 };
   const ROLE = { owner: 'Owner', partner: 'Partner', manager: 'Partner', staff: 'Staff' };
   const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
-  const state = { board: 'local', clientScope: 'local', me: null, config: {}, users: [], tasks: [], clients: [], categories: [], rules: [], tab: 'tasks', confirm: null, editing: null, clientId: null };
+  const state = { recBoard: 'local', board: 'local', clientScope: 'local', me: null, config: {}, users: [], tasks: [], clients: [], categories: [], rules: [], tab: 'tasks', confirm: null, editing: null, clientId: null };
 
   /* Common Pakistan filing deadlines as starting points. Change the day if a notification moves it. */
   const PRESETS = [
@@ -16,6 +16,16 @@
     { label: 'Income Tax Return – Company', title: 'Income Tax Return', cat: 'Income Tax', frequency: 'annual', dueDay: 31, dueMonth: 12 },
     { label: 'PRA Return', title: 'PRA Sales Tax on Services Return', cat: 'Provincial Sales Tax', frequency: 'monthly', dueDay: 18 },
     { label: 'SRB Return', title: 'SRB Sales Tax on Services Return', cat: 'Provincial Sales Tax', frequency: 'monthly', dueDay: 18 },
+  ];
+  /* Starting points for international clients. Deadlines differ by country and year end, so check the day and month before saving. */
+  const INTL_PRESETS = [
+    { label: 'VAT / GST return (quarterly)', title: 'VAT Return', cat: 'Sales Tax', frequency: 'quarterly', dueDay: 7, months: [2, 5, 8, 11] },
+    { label: 'VAT / GST return (monthly)', title: 'VAT Return', cat: 'Sales Tax', frequency: 'monthly', dueDay: 7 },
+    { label: 'Payroll filing (monthly)', title: 'Payroll Filing', cat: 'Payroll', frequency: 'monthly', dueDay: 19 },
+    { label: 'Bookkeeping (monthly)', title: 'Monthly Bookkeeping', cat: 'Bookkeeping', frequency: 'monthly', dueDay: 10 },
+    { label: 'Annual accounts', title: 'Annual Accounts', cat: 'SECP / Corporate', frequency: 'annual', dueDay: 30, dueMonth: 9 },
+    { label: 'Corporate tax return', title: 'Corporate Tax Return', cat: 'Income Tax', frequency: 'annual', dueDay: 31, dueMonth: 12 },
+    { label: 'Annual company filing', title: 'Annual Company Filing', cat: 'SECP / Corporate', frequency: 'annual', dueDay: 30, dueMonth: 6 },
   ];
 
   /* ---------- utilities ---------- */
@@ -390,6 +400,10 @@
     try { await api('DELETE', '/api/tasks/' + t.id); state.tasks = state.tasks.filter(x => x.id !== t.id); render(); toast('Task deleted'); }
     catch (err) { toast(err.message); renderBoards(); }
   }
+  document.querySelectorAll('#recBoard button').forEach(b => b.addEventListener('click', () => {
+    state.recBoard = b.dataset.board; try { localStorage.setItem('cbg-recboard', state.recBoard); } catch { } renderRules();
+  }));
+  try { state.recBoard = localStorage.getItem('cbg-recboard') || 'local'; } catch { }
   document.querySelectorAll('#boardSwitch button').forEach(b => b.addEventListener('click', () => {
     if (state.board === b.dataset.board) return;
     state.board = b.dataset.board; try { localStorage.setItem('cbg-board', state.board); } catch { }
@@ -841,10 +855,18 @@
     if (r.frequency === 'quarterly') return `Quarterly · due ${d(r.dueDay)} of ${r.months.map(m => MONTHS[m - 1].slice(0, 3)).join(', ')}`;
     return `Yearly · due ${r.dueDay} ${MONTHS[(r.dueMonth || 1) - 1]}`;
   }
+  const ruleIntl = r => clientById(r.clientId)?.scope === 'intl';
   function renderRules() {
+    const both = hasIntlBoard() && hasLocalBoard();
+    if (!hasIntlBoard()) state.recBoard = 'local'; else if (!hasLocalBoard()) state.recBoard = 'intl';
+    $('#recBoard').hidden = !both;
+    document.querySelectorAll('#recBoard button').forEach(b => { const on = b.dataset.board === state.recBoard; b.classList.toggle('on', on); b.setAttribute('aria-selected', on); });
+    const intl = state.recBoard === 'intl';
+    $('#newRuleBtn').textContent = intl ? '+ Add international recurring task' : '+ Add recurring task';
+    const rules = state.rules.filter(r => ruleIntl(r) === intl);
     const tb = $('#ruleTable tbody'); tb.replaceChildren();
-    if (!state.rules.length) { const tr = el('tr'); const td = el('td', 'empty-state', 'No recurring tasks yet. Add your monthly, quarterly and yearly returns here.'); td.colSpan = 6; tr.append(td); tb.append(tr); }
-    for (const r of state.rules) {
+    if (!rules.length) { const tr = el('tr'); const td = el('td', 'empty-state', intl ? 'No recurring tasks for international clients yet. Use “Add international recurring task” for VAT returns, payroll, annual accounts and so on.' : 'No recurring tasks yet. Add your monthly, quarterly and yearly returns here.'); td.colSpan = 6; tr.append(td); tb.append(tr); }
+    for (const r of rules) {
       const tr = el('tr', r.active ? '' : 'paused');
       const t = el('td'); t.append(el('b', null, r.title)); if (r.categoryName) t.append(el('small', null, r.categoryName)); tr.append(t);
       tr.append(el('td', null, r.clientName || '—'));
@@ -888,21 +910,23 @@
   }
   function openRule(r) {
     editRule = r || null; $('#ruleForm').reset(); showErr('#ruleError');
-    fillCats($('#rCat')); fillClients($('#rClient'), r?.clientId); $('#rWhoSearch').value = '';
-    renderWho(r?.clientId ? (clientById(r.clientId)?.scope === 'intl' ? 'intl' : 'local') : null, r ? r.assigneeIds : [], 'r'); suggestPerson($('#rClient'), 'r');
+    const recScope = r ? (ruleIntl(r) ? 'intl' : 'local') : state.recBoard;
+    fillCats($('#rCat')); fillClients($('#rClient'), r?.clientId, r ? null : recScope); $('#rWhoSearch').value = '';
+    renderWho(recScope, r ? r.assigneeIds : [], 'r'); suggestPerson($('#rClient'), 'r');
     fillPartnerChecks($('#rPartners'), r ? r.partnerIds : []);
     const mSel = $('#rMonth'); mSel.replaceChildren(); MONTHS.forEach((m, i) => opt(mSel, i + 1, m));
     const box = $('#rMonths'); box.replaceChildren();
     MONTHS.forEach((m, i) => { const l = el('label'); const c = el('input'); c.type = 'checkbox'; c.value = i + 1; c.id = 'rm-' + (i + 1); c.onchange = preview; l.append(c, document.createTextNode(m.slice(0, 3))); box.append(l); });
     const pre = $('#presets'); pre.replaceChildren(el('span', 'flabel', 'Quick start'));
-    for (const p of PRESETS) pre.append(btn(p.label, '', () => applyPreset(p)));
+    for (const p of recScope === 'intl' ? INTL_PRESETS : PRESETS) pre.append(btn(p.label, '', () => applyPreset(p)));
+    $('#ruleDlgTitle').textContent = r ? 'Edit recurring task' : recScope === 'intl' ? 'Add international recurring task' : 'Add recurring task';
     pre.hidden = !!r;
     if (r) {
       $('#rTitle').value = r.title; $('#rCat').value = r.categoryId ?? ''; $('#rClient').value = r.clientId ?? '';
       $('#rFreq').value = r.frequency; $('#rDay').value = r.dueDay; $('#rMonth').value = r.dueMonth || 1; $('#rLead').value = r.leadDays; $('#rPri').value = r.priority; $('#rNotes').value = r.notes;
       r.months.forEach(m => { const c = $('#rm-' + m); if (c) c.checked = true; });
     } else { $('#rPri').value = 'high'; [1, 4, 7, 10].forEach(m => $('#rm-' + m).checked = true); }
-    $('#ruleDlgTitle').textContent = r ? 'Edit recurring task' : 'Add recurring task';
+    // title already set above for the right view
     syncFreq(); $('#ruleDlg').showModal(); $('#rTitle').focus();
   }
   function applyPreset(p) {
@@ -1153,7 +1177,7 @@
   // Match the header row by its column names, wherever it sits in the sheet
   const COLS = [['title', /^task( name)?$/], ['client', /^client( name)?$/], ['authorizedCapital', /^authori[sz]ed capital/], ['paidUpCapital', /^paid[- ]?up capital/],
     ['assignTo', /^assign(ed)? to/], ['partners', /^partners?( involved)?$/], ['category', /^(task )?category/], ['repeat', /^repeats?$/], ['dueDay', /^due on day/],
-    ['dueMonth', /^due in month/], ['leadDays', /^add to board|days before/], ['priority', /^priority/], ['instructions', /^(instructions|notes)/]];
+    ['dueMonth', /^due in month/], ['country', /^country/], ['international', /^(international|intl|scope|local ?\/ ?international)/], ['leadDays', /^add to board|days before/], ['priority', /^priority/], ['instructions', /^(instructions|notes)/]];
   const CLIENT_COLS = [['name', /^(client( name)?|name)$/], ['entityType', /^(client )?type$/], ['cnic', /^cnic/], ['ntn', /^ntn/], ['strn', /^strn/], ['email', /^e-?mail/],
     ['phone', /^(phone|mobile|cell|contact (no|number))/], ['contactPerson', /^contact person/], ['authorizedCapital', /^authori[sz]ed capital/], ['paidUpCapital', /^paid[- ]?up capital/],
     ['partner', /^partner( in charge)?$/]];
@@ -1183,7 +1207,7 @@
     const line = (n, label, cls) => { if (!n) return; const d = el('span', 'imp-pill ' + cls); d.append(el('b', null, String(n)), document.createTextNode(' ' + label)); sum.append(d); };
     const what = importMode === 'clients' ? ['client ready', 'clients ready'] : ['recurring task ready', 'recurring tasks ready'];
     line(s.ok, s.ok === 1 ? what[0] : what[1], 'ok'); line(s.skip, 'skipped', 'skip'); line(s.error, s.error === 1 ? 'row has a problem' : 'rows have a problem', 'err');
-    line(s.newClients, s.newClients === 1 ? 'new client will be added' : 'new clients will be added', 'info'); line(s.newCategories, 'new categories', 'info'); line(s.logins, s.logins === 1 ? 'portal login' : 'portal logins', 'info');
+    line(s.newClients, s.newClients === 1 ? 'new client will be added' : 'new clients will be added', 'info'); line(s.newIntlClients, s.newIntlClients === 1 ? 'of them international' : 'of them international', 'info'); line(s.newCategories, 'new categories', 'info'); line(s.logins, s.logins === 1 ? 'portal login' : 'portal logins', 'info');
     const tb = $('#importRows'); tb.replaceChildren();
     const order = { error: 0, skip: 1, ok: 2 };
     for (const r of [...res.results].sort((a, b) => order[a.status] - order[b.status] || a.line - b.line)) {

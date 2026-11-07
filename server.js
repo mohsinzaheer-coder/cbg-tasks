@@ -1231,11 +1231,18 @@ route('POST', '/api/recurring/import', true, async (req, res, body, me) => {
     let catId = null; const catName = String(row.category ?? '').trim();
     if (catName) { const c = cats.get(norm(catName)); if (c) catId = c.id; else { newCats.set(norm(catName), catName.slice(0, 50)); notes.push(`New category "${catName}" will be added`); } }
     const client = clients.get(norm(clientName));
-    if (clientName && !client && !newClients.has(norm(clientName))) notes.push('New client will be added');
+    // A new client is international when the row says so, or names a country other than Pakistan
+    const country = String(row.country ?? '').trim().slice(0, 60);
+    const wantsIntl = /^(y|yes|true|1|international|intl)$/i.test(String(row.international ?? '').trim()) || (!!country && !/^pak/i.test(country));
+    const pending = newClients.get(norm(clientName));
+    const scope = client ? (client.scope === 'intl' ? 'intl' : 'local') : pending ? pending.scope : (wantsIntl ? 'intl' : 'local');
+    if (clientName && !client && !pending) notes.push(scope === 'intl' ? 'New international client will be added; the people on this row get access' : 'New client will be added');
+    if (client && wantsIntl && scope === 'local') notes.push('Client already exists as a local client, so it stays local');
     if (client && client.scope === 'intl') {
       try { checkIntlPeople(client.id, [...people, ...partners]); checkWorkArea(client.id, people); } catch (e) { errors.push(e.message); }
     } else for (const uid of people) {
-      const u = users.find(x => x.id === uid); if (u.role === 'staff' && u.work_area === 'intl') errors.push(`${u.name} works on international clients only`);
+      const u = users.find(x => x.id === uid);
+      if (u.role === 'staff' && u.work_area !== 'both' && u.work_area !== scope) errors.push(`${u.name} works on ${scope === 'intl' ? 'local' : 'international'} clients only`);
     }
     const key = norm(title) + '|' + norm(clientName);
     let status = errors.length ? 'error' : 'ok';
@@ -1252,7 +1259,9 @@ route('POST', '/api/recurring/import', true, async (req, res, body, me) => {
     if (status === 'ok' && client && existing.has(norm(title) + '|' + client.id)) { status = 'skip'; notes.push('Already set up in Recurring'); }
     seen.add(key);
     if (status === 'ok') {
-      if (!client && !newClients.has(norm(clientName))) newClients.set(norm(clientName), { name: clientName, authorized: cleanMoney(row.authorizedCapital), paid: cleanMoney(row.paidUpCapital) });
+      if (!client && !newClients.has(norm(clientName))) newClients.set(norm(clientName), { name: clientName, scope, country, access: new Set(), authorized: cleanMoney(row.authorizedCapital), paid: cleanMoney(row.paidUpCapital) });
+      const nc = newClients.get(norm(clientName));
+      if (nc && nc.scope === 'intl') for (const uid of [...people, ...partners]) if (users.find(x => x.id === uid)?.role !== 'owner') nc.access.add(uid);
       plan.push({ title, clientKey: norm(clientName), catKey: catId ? null : (catName ? norm(catName) : null), catId, people: [...new Set(people)], partners: [...new Set(partners)],
         frequency, dueDay, dueMonth, months, leadDays, authorized: cleanMoney(row.authorizedCapital), paid: cleanMoney(row.paidUpCapital),
         priority: ['high', 'medium', 'low'].includes(norm(row.priority)) ? norm(row.priority) : 'high', notes: String(row.instructions ?? '').trim().slice(0, 2000) });
@@ -1260,15 +1269,17 @@ route('POST', '/api/recurring/import', true, async (req, res, body, me) => {
     return { line, title, client: clientName, status, errors, notes };
   });
   const summary = { ok: plan.length, skip: results.filter(r => r.status === 'skip').length, error: results.filter(r => r.status === 'error').length,
-    newClients: newClients.size, newCategories: newCats.size };
+    newClients: newClients.size, newIntlClients: [...newClients.values()].filter(c => c.scope === 'intl').length, newCategories: newCats.size };
   if (!body.commit) return send(res, 200, { results, summary });
   if (!plan.length) throw bad('There is nothing to import. Fix the rows marked with a problem and try again.');
   const ruleIds = tx(() => {
     const now = Date.now();
     for (const [k, name] of newCats) { const r = db.prepare('INSERT INTO categories (name) VALUES (?)').run(name); cats.set(k, { id: Number(r.lastInsertRowid), name }); }
     for (const [k, c] of newClients) {
-      const r = db.prepare("INSERT INTO clients (name, entity_type, scope, authorized_capital, paid_up_capital, created_at, updated_at) VALUES (?, 'Company', 'local', ?, ?, ?, ?)").run(c.name, c.authorized, c.paid, now, now);
-      clients.set(k, { id: Number(r.lastInsertRowid), scope: 'local' });
+      const r = db.prepare("INSERT INTO clients (name, entity_type, scope, country, authorized_capital, paid_up_capital, created_at, updated_at) VALUES (?, 'Company', ?, ?, ?, ?, ?, ?)")
+        .run(c.name, c.scope, c.country, c.scope === 'intl' ? '' : c.authorized, c.scope === 'intl' ? '' : c.paid, now, now);
+      const id = Number(r.lastInsertRowid); clients.set(k, { id, scope: c.scope });
+      for (const uid of c.access) db.prepare('INSERT OR IGNORE INTO client_access (client_id, user_id) VALUES (?,?)').run(id, uid);
     }
     const ids = [];
     for (const p of plan) {

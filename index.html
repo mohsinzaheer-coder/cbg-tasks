@@ -139,6 +139,10 @@
         <div><h1>Recurring tasks</h1><p class="sub">Returns and filings that repeat. Each one is added to the task board automatically, a set number of days before it's due.</p></div>
         <div class="mini"><button type="button" id="importRulesBtn" hidden>Import from Excel</button><button class="primary" type="button" id="newRuleBtn">+ Add recurring task</button></div>
       </div>
+      <div class="board-switch" id="recBoard" role="tablist" aria-label="Recurring tasks for" hidden>
+        <button type="button" role="tab" data-board="local" aria-selected="true" class="on">Local</button>
+        <button type="button" role="tab" data-board="intl" aria-selected="false">International</button>
+      </div>
       <div class="table-wrap"><table class="table" id="ruleTable">
         <thead><tr><th>Task</th><th>Client</th><th>Assigned to</th><th>Schedule</th><th>Next due</th><th></th></tr></thead>
         <tbody></tbody>
@@ -321,7 +325,7 @@
 <dialog id="importDlg" class="wide-dlg import-dlg">
   <form id="importForm" class="stack" method="dialog" autocomplete="off">
     <h2 id="importTitle">Import recurring tasks</h2>
-    <p class="help" id="importHelpRules">Upload an Excel (.xlsx) or CSV file with these columns: <b>Task Name, Client Name, Assign To, Partner, Category, Repeat, Due on Day, Due In Month, Add to board this many days before due</b>. Optional: Authorized Capital, Paid up Capital, Priority, Instructions. Several people go in one cell, separated by commas.</p>
+    <p class="help" id="importHelpRules">Upload an Excel (.xlsx) or CSV file with these columns: <b>Task Name, Client Name, Assign To, Partner, Category, Repeat, Due on Day, Due In Month, Add to board this many days before due</b>. Optional: Authorized Capital, Paid up Capital, Priority, Instructions, and <b>Country</b> or <b>International</b> (Yes) for clients outside Pakistan. Several people go in one cell, separated by commas.</p>
     <p class="help" id="importHelpClients" hidden>Upload an Excel (.xlsx) or CSV file with a <b>Client Name</b> column. Optional: Client Type, CNIC, NTN, STRN, Email, Phone, Contact Person, Authorized Capital, Paid up Capital, Partner in charge, and logins as <b>SECP ID, SECP Password, SECP PIN</b> (same for FBR, PRA, SRB, KPRA, BRA). Existing clients are matched by name: their blank details are filled in and logins in the file replace saved ones. Passwords stay hidden here and are saved encrypted.</p>
     <label for="importFile">File<input type="file" id="importFile" accept=".xlsx,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv"></label>
     <div id="importSummary" class="import-summary" hidden></div>
