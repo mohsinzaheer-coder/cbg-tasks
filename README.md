@@ -73,6 +73,9 @@ Only the owner and the partners and staff ticked under **People who can see this
 Tasks for international clients appear on the main Tasks board for those people, marked **Intl**. Use the Client filter's **International only** to show just them.
 Someone can only be removed from an international client once their open and recurring tasks for it have been reassigned.
 
+The **Tasks** page has two dashboards, **Local** and **International**, each with its own counts, filters and table.
+Each staff member has a **Works on** setting (Local, International, or Both) on the People page. It decides which dashboard they see, which kind of client tasks they can be given, and whether they can be given access to international clients.
+
 ## My feed and personal tasks
 
 The owner and partners have a **My feed** tab for their own to-dos. Each one is **Business** or **Personal**.

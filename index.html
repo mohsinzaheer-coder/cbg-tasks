@@ -68,6 +68,10 @@
   <div class="page">
     <!-- Tasks -->
     <section id="tasksPage" class="stack-lg">
+      <div class="board-switch" id="boardSwitch" role="tablist" aria-label="Task dashboard" hidden>
+        <button type="button" role="tab" data-board="local" aria-selected="true" class="on">Local</button>
+        <button type="button" role="tab" data-board="intl" aria-selected="false">International</button>
+      </div>
       <div class="head">
         <div><h1 id="tasksTitle">Tasks</h1><p class="sub" id="tasksSub"></p></div>
         <button class="primary" type="button" id="newTaskBtn" hidden>+ Assign task</button>
@@ -280,6 +284,7 @@
     </div>
     <label for="uName">Full name<input id="uName" required maxlength="80"></label>
     <label for="uTitle">Job title<input id="uTitle" maxlength="60" placeholder="e.g. Tax Associate"></label>
+    <label for="uArea" id="uAreaWrap">Works on<select id="uArea"><option value="local">Local clients</option><option value="intl">International clients</option><option value="both">Both local and international</option></select></label>
     <div class="row2">
       <label for="uLogin">Login ID<input id="uLogin" required maxlength="40" pattern="[A-Za-z0-9._\-]{3,40}" placeholder="e.g. ahmed.k"></label>
       <label for="uPass" id="uPassWrap">Temporary password<input id="uPass" required minlength="8" maxlength="128"></label>

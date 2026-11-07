@@ -295,3 +295,9 @@ button.stat.on{border-color:var(--gold);background:var(--gold-soft);box-shadow:i
 .chip.intl{background:var(--accent-soft);color:var(--text);font-size:.7rem;padding:0 6px;vertical-align:1px}
 .msel-group{font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);padding:8px 6px 2px}
 .msel-actions{gap:8px}
+
+/* local / international dashboards */
+.board-switch{display:inline-flex;align-self:flex-start;gap:2px;background:var(--ink);border-radius:12px;padding:4px}
+.board-switch button{border:0;background:transparent;color:var(--bg);opacity:.7;font-family:var(--f-display);font-weight:600;font-size:.95rem;padding:9px 20px;border-radius:9px}
+.board-switch button:hover{opacity:1}
+.board-switch button.on{background:var(--gold);color:#151413;opacity:1}

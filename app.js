@@ -5,7 +5,7 @@
   const PRI = { high: 0, medium: 1, low: 2 };
   const ROLE = { owner: 'Owner', partner: 'Partner', manager: 'Partner', staff: 'Staff' };
   const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
-  const state = { clientScope: 'local', me: null, config: {}, users: [], tasks: [], clients: [], categories: [], rules: [], tab: 'tasks', confirm: null, editing: null, clientId: null };
+  const state = { board: 'local', clientScope: 'local', me: null, config: {}, users: [], tasks: [], clients: [], categories: [], rules: [], tab: 'tasks', confirm: null, editing: null, clientId: null };
 
   /* Common Pakistan filing deadlines as starting points. Change the day if a notification moves it. */
   const PRESETS = [
@@ -90,7 +90,7 @@
     $('#newClientBtn').hidden = !mgmt(); $('#cMgrWrap').hidden = !seesAll();
     $('#credsOff').hidden = !!state.config.credsEnabled;
     $('#tasksTitle').textContent = { staff: 'My tasks', manager: 'My team\'s tasks', partner: 'Tasks', owner: 'All tasks' }[me.role];
-    $('#tasksSub').textContent = {
+    state.tasksSubLocal = {
       staff: 'Your tasks. Update the status as you go, or add your own with “Add my task”.',
       manager: 'Tasks for you and the staff who report to you.',
       partner: 'Business tasks for you and your staff, tasks you assigned, and tasks you are involved in as a partner.',
@@ -140,8 +140,10 @@
     sel.value = [...sel.options].some(o => o.value === keep) ? keep : '';
   }
   // The people this user may pick, grouped the same way the server allows assigning
-  function addPeopleOptions(sel, forFilter) {
-    const me = state.me; const active = state.users.filter(u => u.active);
+  const AREA_TEXT = { local: 'Local', intl: 'International', both: 'Local + International' };
+  const worksOn = (u, scope) => !scope || u.role !== 'staff' || u.workArea === 'both' || u.workArea === scope;
+  function addPeopleOptions(sel, forFilter, scope) {
+    const me = state.me; const active = state.users.filter(u => u.active && worksOn(u, scope));
     const label = u => u.name + (u.title ? ' · ' + u.title : '');
     if (me.role === 'staff') return;
     opt(sel, me.id, forFilter ? 'My own tasks' : me.name + ' (me)');
@@ -171,10 +173,16 @@
   }
 
   /* ---------- tasks ---------- */
+  // Local dashboard: tasks with a local client or no client. International dashboard: tasks for international clients.
+  const isIntlTask = t => clientById(t.clientId)?.scope === 'intl';
+  const myArea = () => state.me.role === 'staff' ? (state.me.workArea || userById(state.me.id)?.workArea || 'local') : 'both';
+  const hasIntlBoard = () => myArea() !== 'local' && (mgmt() || state.clients.some(c => c.scope === 'intl'));
+  const hasLocalBoard = () => myArea() !== 'intl';
   function filteredTasks() {
     const p = $('#fPerson').value, pt = $('#fPartner').value, ct = $('#fCat').value, pri = $('#fPri').value, q = $('#fText').value.trim().toLowerCase();
     return state.tasks.filter(t => {
       if (t.visibility === 'personal') return false; // personal tasks live only in My feed
+      if ((state.board === 'intl') !== isIntlTask(t)) return false;
       if (p.startsWith('team:')) { const mid = Number(p.slice(5)); const u = userById(t.assigneeId); if (!(t.assigneeId === mid || (u && u.managerId === mid))) return false; }
       else if (p && t.assigneeId !== Number(p)) return false;
       if (pt && !t.partnerIds.includes(Number(pt))) return false;
@@ -299,7 +307,17 @@
     tr.append(ac);
     return tr;
   }
+  function syncBoard() {
+    if (!hasIntlBoard() && state.board === 'intl') state.board = 'local';
+    if (!hasLocalBoard()) state.board = 'intl';
+    $('#boardSwitch').hidden = !(hasIntlBoard() && hasLocalBoard());
+    document.querySelectorAll('#boardSwitch button').forEach(b => { const on = b.dataset.board === state.board; b.classList.toggle('on', on); b.setAttribute('aria-selected', on); });
+    const intl = state.board === 'intl', role = state.me.role;
+    $('#tasksTitle').textContent = intl ? 'International tasks' : hasIntlBoard() ? (role === 'staff' ? 'My local tasks' : 'Local tasks') : ({ staff: 'My tasks', partner: 'Tasks', owner: 'All tasks' }[role] || 'Tasks');
+    $('#tasksSub').textContent = intl ? 'Tasks for international clients. Only people with access to a client see its tasks.' : state.tasksSubLocal;
+  }
   function renderTasks() {
+    syncBoard();
     const tasks = filteredTasks();
     $('#sOpen').textContent = tasks.filter(t => t.status !== 'done').length;
     $('#sDoing').textContent = tasks.filter(t => t.status === 'doing').length;
@@ -307,8 +325,10 @@
     $('#sDone').textContent = tasks.filter(t => t.status === 'done').length;
     const cur = statusTab.lanes || 'all';
     document.querySelectorAll('#tasksPage .stat').forEach(b => { const on = b.dataset.stat === cur; b.classList.toggle('on', on); b.setAttribute('aria-pressed', on); });
-    const none = !state.tasks.some(t => t.visibility !== 'personal');
-    drawLanes($('#lanes'), tasks, none ? (lead() ? 'No tasks yet. Use “Assign task” to give someone work.' : 'No tasks assigned to you yet.') : null);
+    const intl = state.board === 'intl';
+    const none = !state.tasks.some(t => t.visibility !== 'personal' && isIntlTask(t) === intl);
+    drawLanes($('#lanes'), tasks, none ? (intl ? (lead() ? 'No international tasks yet. Use “Assign task” and choose an international client.' : 'No international tasks for you yet.')
+      : (lead() ? 'No tasks yet. Use “Assign task” to give someone work.' : 'No tasks assigned to you yet.')) : null);
   }
   function renderFeed() {
     const ty = $('#feedType').value, q = $('#feedText').value.trim().toLowerCase();
@@ -365,6 +385,12 @@
     try { await api('DELETE', '/api/tasks/' + t.id); state.tasks = state.tasks.filter(x => x.id !== t.id); render(); toast('Task deleted'); }
     catch (err) { toast(err.message); renderBoards(); }
   }
+  document.querySelectorAll('#boardSwitch button').forEach(b => b.addEventListener('click', () => {
+    if (state.board === b.dataset.board) return;
+    state.board = b.dataset.board; try { localStorage.setItem('cbg-board', state.board); } catch { }
+    selClients.clear(); statusTab.lanes = 'all'; renderClientFilter(); renderTasks();
+  }));
+  try { state.board = localStorage.getItem('cbg-board') || 'local'; } catch { }
   // The four boxes filter the list below; clicking the selected one again shows everything
   document.querySelectorAll('#tasksPage .stat').forEach(b => b.addEventListener('click', () => {
     statusTab.lanes = statusTab.lanes === b.dataset.stat ? 'all' : b.dataset.stat; renderTasks();
@@ -379,14 +405,14 @@
     b.classList.toggle('active', n > 0);
   }
   function renderClientFilter() {
-    const active = state.clients.filter(c => c.active);
+    const active = state.clients.filter(c => c.active && (c.scope === 'intl') === (state.board === 'intl'));
     for (const id of [...selClients]) if (!active.some(c => c.id === id)) selClients.delete(id);
     const q = $('#fClientSearch').value.trim().toLowerCase();
     const list = $('#fClientList'); list.replaceChildren();
     const shown = active.filter(c => !q || `${c.name} ${c.code} ${c.country}`.toLowerCase().includes(q))
       .sort((a, b) => (a.scope === 'intl') - (b.scope === 'intl') || a.name.localeCompare(b.name));
-    const hasIntl = active.some(c => c.scope === 'intl');
-    $('#fClientIntl').hidden = !hasIntl;
+    const hasIntl = false; // each dashboard lists only its own clients
+    $('#fClientIntl').hidden = true;
     if (!shown.length) list.append(el('p', 'help', active.length ? 'No clients match.' : 'No clients yet.'));
     let heading = null;
     for (const c of shown) {
@@ -412,10 +438,13 @@
   $('#fText').addEventListener('input', renderTasks);
 
   /* shared pickers */
-  function fillPeople(sel) { sel.replaceChildren(); opt(sel, '', 'Choose a person'); addPeopleOptions(sel, false); }
-  function fillClients(sel, includeId) {
+  function fillPeople(sel, scope) {
+    const keep = sel.value; sel.replaceChildren(); opt(sel, '', 'Choose a person'); addPeopleOptions(sel, false, scope);
+    if (keep && [...sel.options].some(o => o.value === keep)) sel.value = keep;
+  }
+  function fillClients(sel, includeId, onlyScope) {
     sel.replaceChildren(); opt(sel, '', 'No client (internal)');
-    const avail = state.clients.filter(c => c.active || c.id === includeId);
+    const avail = state.clients.filter(c => (c.active || c.id === includeId) && (!onlyScope || c.scope === onlyScope || c.id === includeId));
     const label = c => c.name + (c.code ? ` (${c.code})` : '');
     const local = avail.filter(c => c.scope !== 'intl'), intl = avail.filter(c => c.scope === 'intl');
     if (intl.length) {
@@ -456,7 +485,11 @@
     clientSel.onchange = () => {
       if (clientSel.value === '__new' || clientSel.value === '__newintl') return addClientFrom(clientSel, () => clientSel.onchange(), clientSel.value === '__newintl' ? 'intl' : 'local');
       clientSel.dataset.prev = clientSel.value;
-      const c = clientById(Number(clientSel.value)); if (!c || whoSel.value) return;
+      const c = clientById(Number(clientSel.value));
+      // only list staff whose "Works on" setting covers this kind of client
+      if (lead()) fillPeople(whoSel, c ? (c.scope === 'intl' ? 'intl' : 'local') : null);
+      if (whoSel.id === 'tWho') syncTaskType();
+      if (!c || whoSel.value) return;
       const pool = c.scope === 'intl' ? c.accessIds.filter(id => userById(id)?.role === 'staff') : c.staffIds;
       const pick = pool.find(id => userById(id)?.active) ?? (userById(c.managerId) ? c.managerId : null);
       if (pick != null && [...whoSel.options].some(o => o.value === String(pick))) whoSel.value = String(pick);
@@ -491,7 +524,9 @@
     state.editing = t || null;
     taskMode = t ? (t.assigneeId === state.me.id && t.createdBy === state.me.id ? 'own' : 'assign') : (mode || 'assign');
     $('#taskForm').reset(); showErr('#taskError');
-    fillCats($('#tCat')); fillClients($('#tClient'), t?.clientId); fillPeople($('#tWho'));
+    fillCats($('#tCat')); const boardScope = !t && taskMode === 'assign' && state.tab === 'tasks' ? (state.board === 'intl' ? 'intl' : 'local') : null;
+    const taskScope = t && t.clientId ? (clientById(t.clientId)?.scope === 'intl' ? 'intl' : 'local') : boardScope;
+    fillClients($('#tClient'), t?.clientId, boardScope); fillPeople($('#tWho'), taskScope);
     suggestPerson($('#tClient'), $('#tWho'));
     fillPartnerChecks($('#tPartners'), t ? t.partnerIds : []);
     if (t) {
@@ -664,14 +699,14 @@
   let editClient = null;
   function staffChecks(managerId, selected) {
     const box = $('#kStaff'); box.replaceChildren();
-    const staff = state.users.filter(u => u.role === 'staff' && u.active && (state.me.role === 'partner' ? u.managerId === state.me.id : (!managerId || u.managerId === managerId)));
+    const staff = state.users.filter(u => u.role === 'staff' && u.active && u.workArea !== 'intl' && (state.me.role === 'partner' ? u.managerId === state.me.id : (!managerId || u.managerId === managerId)));
     if (!staff.length) box.append(el('span', 'help', managerId || state.me.role === 'partner' ? 'No staff in this team yet.' : 'Choose a partner to see their staff.'));
     for (const s of staff) { const l = el('label'); const i = el('input'); i.type = 'checkbox'; i.value = s.id; i.checked = selected.includes(s.id); i.id = 'ks-' + s.id; l.append(i, document.createTextNode(s.name)); box.append(l); }
   }
   let clientDlgScope = 'local';
   function accessChecks(selected) {
     const box = $('#kStaff'); box.replaceChildren();
-    const people = state.users.filter(u => u.active && (u.role === 'partner' || u.role === 'staff'))
+    const people = state.users.filter(u => u.active && (u.role === 'partner' || (u.role === 'staff' && u.workArea !== 'local')))
       .sort((a, b) => (a.role === 'partner' ? 0 : 1) - (b.role === 'partner' ? 0 : 1) || a.name.localeCompare(b.name));
     if (!people.length) box.append(el('span', 'help', 'No partners or staff yet.'));
     for (const u of people) { const l = el('label'); const i = el('input'); i.type = 'checkbox'; i.value = u.id; i.checked = selected.includes(u.id); i.id = 'ks-' + u.id; l.append(i, document.createTextNode(u.name + (u.role === 'partner' ? ' (partner)' : ''))); box.append(l); }
@@ -866,7 +901,7 @@
   function personRow(u, tag) {
     const li = el('li');
     const wb = el('div', 'who-big'); wb.append(el('span', 'av lg', initials(u.name)));
-    const txt = el('div'); txt.append(el('b', null, u.name), el('small', null, [u.title, 'ID: ' + u.username].filter(Boolean).join(' · '))); wb.append(txt); li.append(wb);
+    const txt = el('div'); txt.append(el('b', null, u.name), el('small', null, [u.title, 'ID: ' + u.username, u.role === 'staff' ? 'Works on: ' + AREA_TEXT[u.workArea || 'local'] : ''].filter(Boolean).join(' · '))); wb.append(txt); li.append(wb);
     if (!u.active) li.append(el('span', 'tag off', 'Deactivated')); else if (tag) li.append(el('span', 'tag', tag));
     const c = openCount(u.id); const nCl = state.clients.filter(x => x.active && (x.staffIds.includes(u.id) || x.managerId === u.id)).length;
     li.append(el('span', 'load', `${c.open} open${c.late ? ` · ${c.late} overdue` : ''} · ${nCl} client${nCl === 1 ? '' : 's'}`));
@@ -929,16 +964,18 @@
     $('#uPassWrap').hidden = !!u; $('#uPass').required = !u; $('#personHelp').hidden = !!u;
     const sel = $('#uMgr'); sel.replaceChildren(); for (const m of state.users.filter(x => x.role === 'partner' && x.active)) opt(sel, m.id, m.name);
     if (u) {
-      $('#uName').value = u.name; $('#uTitle').value = u.title; $('#uLogin').value = u.username;
+      $('#uName').value = u.name; $('#uTitle').value = u.title; $('#uLogin').value = u.username; $('#uArea').value = u.workArea || 'local';
+      $('#uAreaWrap').hidden = u.role !== 'staff';
       $('#personDlgTitle').textContent = 'Edit ' + ({ owner: 'my details', partner: 'partner', manager: 'manager', staff: 'staff member' }[u.role]);
       $('#personSave').textContent = 'Save changes';
-    } else { $('#uRole').value = owner && !sel.options.length ? 'partner' : 'staff'; syncRole(); $('#uPass').value = tempPassword(); }
+    } else { $('#uRole').value = owner && !sel.options.length ? 'partner' : 'staff'; $('#uArea').value = 'local'; syncRole(); $('#uPass').value = tempPassword(); }
     $('#personDlg').showModal(); $('#uName').focus();
   }
   function syncRole() {
     if (editPerson) return;
     const role = state.me.role === 'owner' ? $('#uRole').value : 'staff';
     $('#uMgrWrap').hidden = role !== 'staff' || state.me.role !== 'owner';
+    $('#uAreaWrap').hidden = role !== 'staff';
     const t = { staff: 'Add staff member', manager: 'Add manager', partner: 'Add partner' }[role];
     $('#personDlgTitle').textContent = t; $('#personSave').textContent = t;
   }
@@ -949,7 +986,7 @@
     if (editPerson) {
       const b = $('#personSave'); b.disabled = true;
       try {
-        const { user } = await api('PATCH', '/api/users/' + editPerson.id, { name: $('#uName').value.trim(), title: $('#uTitle').value.trim(), username: $('#uLogin').value.trim() });
+        const { user } = await api('PATCH', '/api/users/' + editPerson.id, { name: $('#uName').value.trim(), title: $('#uTitle').value.trim(), username: $('#uLogin').value.trim(), ...(editPerson.role === 'staff' ? { workArea: $('#uArea').value } : {}) });
         state.users = state.users.map(x => x.id === user.id ? user : x);
         if (user.id === state.me.id) { Object.assign(state.me, user); $('#meName').textContent = user.name; }
         $('#personDlg').close(); await refresh();
@@ -960,7 +997,7 @@
     }
     const role = state.me.role === 'owner' ? $('#uRole').value : 'staff';
     if (role === 'staff' && state.me.role === 'owner' && !$('#uMgr').value) return showErr('#personError', 'Add a partner first, then add staff under them.');
-    const body = { role, managerId: Number($('#uMgr').value) || undefined, name: $('#uName').value.trim(), title: $('#uTitle').value.trim(), username: $('#uLogin').value.trim(), password: $('#uPass').value };
+    const body = { role, managerId: Number($('#uMgr').value) || undefined, name: $('#uName').value.trim(), title: $('#uTitle').value.trim(), username: $('#uLogin').value.trim(), password: $('#uPass').value, workArea: $('#uArea').value };
     const b = $('#personSave'); b.disabled = true;
     try { const { user } = await api('POST', '/api/users', body); state.users.push(user); $('#personDlg').close(); render(); toast(`${user.name} added. Login ID: ${user.username}`); }
     catch (err) { showErr('#personError', err.message); }

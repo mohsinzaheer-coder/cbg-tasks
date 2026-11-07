@@ -179,6 +179,13 @@ CREATE TABLE IF NOT EXISTS recurring (
   if (!cols.includes('country')) db.exec("ALTER TABLE clients ADD COLUMN country TEXT NOT NULL DEFAULT ''");
   if (!cols.includes('tax_id')) db.exec("ALTER TABLE clients ADD COLUMN tax_id TEXT NOT NULL DEFAULT ''");
 }
+// Version 2.10: staff work on local clients, international clients, or both
+if (!db.prepare('PRAGMA table_info(users)').all().some(c => c.name === 'work_area')) {
+  db.exec("ALTER TABLE users ADD COLUMN work_area TEXT NOT NULL DEFAULT 'local'");
+  db.exec("UPDATE users SET work_area = 'both' WHERE role <> 'staff'");
+  if (db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'client_access'").get())
+    db.exec("UPDATE users SET work_area = 'both' WHERE id IN (SELECT user_id FROM client_access)");
+}
 db.exec(`CREATE TABLE IF NOT EXISTS client_access (
   client_id INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
   user_id   INTEGER NOT NULL REFERENCES users(id),
@@ -300,7 +307,20 @@ const limited = key => { const a = attempts.get(key); return a && a.count >= 5 &
 function fail(key) { const a = attempts.get(key); if (!a || a.until < Date.now()) attempts.set(key, { count: 1, until: Date.now() + 15 * 60e3 }); else a.count++; }
 
 /* ---------------------------------------------------------- permissions */
-const publicUser = u => u && ({ id: u.id, username: u.username, name: u.name, title: u.title, role: u.role, managerId: u.manager_id, active: !!u.active, mustChange: !!u.must_change });
+const publicUser = u => u && ({ id: u.id, username: u.username, name: u.name, title: u.title, role: u.role, managerId: u.manager_id, active: !!u.active, mustChange: !!u.must_change, workArea: u.role === 'staff' ? (u.work_area || 'local') : 'both' });
+const WORK_AREAS = ['local', 'intl', 'both'];
+const AREA_LABEL = { local: 'local clients only', intl: 'international clients only' };
+// A staff member's work area must cover the kind of client the work is for
+function checkWorkArea(clientId, userIds) {
+  if (!clientId) return;
+  const c = db.prepare('SELECT scope FROM clients WHERE id = ?').get(clientId); if (!c) return;
+  const kind = c.scope === 'intl' ? 'intl' : 'local';
+  for (const uid of new Set(userIds.filter(Boolean))) {
+    const u = db.prepare('SELECT name, role, work_area FROM users WHERE id = ?').get(uid);
+    if (u && u.role === 'staff' && u.work_area !== 'both' && u.work_area !== kind)
+      throw bad(`${u.name} works on ${AREA_LABEL[u.work_area]}. Change their "Works on" setting on People, or choose someone else.`);
+  }
+}
 function teamIds(me) {
   if (me.role === 'owner') return null;
   if (me.role === 'partner' || me.role === 'manager') return [me.id, ...db.prepare("SELECT id FROM users WHERE manager_id = ? AND role = 'staff'").all(me.id).map(r => r.id)];
@@ -500,8 +520,9 @@ route('POST', '/api/users', true, async (req, res, body, me) => {
     if (!db.prepare("SELECT 1 FROM users WHERE id = ? AND role = 'partner' AND active = 1 AND deleted = 0").get(managerId)) throw bad('Choose the partner this staff member reports to.');
   }
   if (db.prepare('SELECT 1 FROM users WHERE username = ?').get(username)) throw bad('That login ID is already taken.');
-  const r = db.prepare('INSERT INTO users (username,password_hash,name,title,role,manager_id,must_change,created_at) VALUES (?,?,?,?,?,?,1,?)')
-    .run(username, hashPassword(body.password), name, title, role, managerId, Date.now());
+  const area = role === 'staff' ? (WORK_AREAS.includes(body.workArea) ? body.workArea : 'local') : 'both';
+  const r = db.prepare('INSERT INTO users (username,password_hash,name,title,role,manager_id,must_change,created_at,work_area) VALUES (?,?,?,?,?,?,1,?,?)')
+    .run(username, hashPassword(body.password), name, title, role, managerId, Date.now(), area);
   send(res, 201, { user: publicUser(db.prepare('SELECT * FROM users WHERE id = ?').get(r.lastInsertRowid)) });
 });
 route('PATCH', '/api/users/:id', true, async (req, res, body, me, params) => {
@@ -510,6 +531,16 @@ route('PATCH', '/api/users/:id', true, async (req, res, body, me, params) => {
   const sets = {};
   if ('name' in body) { const n = str(body.name, 80, 'Name'); if (!n) throw bad('Enter a name.'); sets.name = n; }
   if ('title' in body) sets.title = str(body.title, 60, 'Job title');
+  if ('workArea' in body && target.role === 'staff') {
+    if (!WORK_AREAS.includes(body.workArea)) throw bad('Choose Local, International or Both.');
+    const losing = body.workArea === 'local' ? 'intl' : body.workArea === 'intl' ? 'local' : null;
+    if (losing) {
+      const open = db.prepare(`SELECT COUNT(*) n FROM tasks t JOIN clients c ON c.id = t.client_id WHERE t.assignee_id = ? AND t.status <> 'done' AND ${losing === 'intl' ? "c.scope = 'intl'" : "c.scope <> 'intl'"}`).get(target.id).n;
+      if (open) throw bad(`${target.name} still has ${open} open ${losing === 'intl' ? 'international' : 'local'} task${open === 1 ? '' : 's'}. Reassign them first.`);
+      if (losing === 'intl' && db.prepare('SELECT 1 FROM client_access WHERE user_id = ?').get(target.id)) db.prepare('DELETE FROM client_access WHERE user_id = ?').run(target.id);
+    }
+    sets.work_area = body.workArea;
+  }
   if ('username' in body) {
     const u = str(body.username, 40, 'Login ID');
     if (!/^[A-Za-z0-9._-]{3,40}$/.test(u)) throw bad('Login ID must be 3–40 letters, numbers, dots, dashes or underscores.');
@@ -641,7 +672,11 @@ function clientFields(body, me, existing) {
 function setClientAccess(clientId, ids, managerId) {
   if (!Array.isArray(ids)) throw bad('People list is not valid.');
   const set = new Set(ids.map(Number)); if (managerId) set.add(managerId); // the partner in charge always has access
-  for (const id of set) if (!db.prepare("SELECT 1 FROM users WHERE id = ? AND role IN ('partner','staff') AND active = 1 AND deleted = 0").get(id)) throw bad('One of the chosen people is not active.');
+  for (const id of set) {
+    const u = db.prepare("SELECT name, role, work_area FROM users WHERE id = ? AND role IN ('partner','staff') AND active = 1 AND deleted = 0").get(id);
+    if (!u) throw bad('One of the chosen people is not active.');
+    if (u.role === 'staff' && u.work_area === 'local') throw bad(`${u.name} works on local clients only. Change their "Works on" setting on People first.`);
+  }
   db.prepare('DELETE FROM client_access WHERE client_id = ?').run(clientId);
   const ins = db.prepare('INSERT INTO client_access (client_id, user_id) VALUES (?,?)'); for (const id of set) ins.run(clientId, id);
 }
@@ -651,6 +686,7 @@ function setClientStaff(me, clientId, managerId, staffIds) {
   for (const id of ids) {
     const u = db.prepare("SELECT * FROM users WHERE id = ? AND role = 'staff' AND active = 1").get(id);
     if (!u) throw bad('One of the chosen staff members is not active.');
+    if (u.work_area === 'intl') throw bad(`${u.name} works on international clients only.`);
     if (me.role === 'partner' && u.manager_id !== me.id) throw bad('You can only assign your own staff.');
   }
   db.prepare('DELETE FROM client_staff WHERE client_id = ?').run(clientId);
@@ -796,6 +832,7 @@ route('POST', '/api/tasks', true, async (req, res, body, me) => {
   const cat = checkCategory(body.categoryId); const cli = checkClient(me, body.clientId);
   if (needsClientCat(me, a.id, me.id, visibility)) requireClientCat(cat, cli);
   checkIntlPeople(cli, [a.id, ...partners]);
+  checkWorkArea(cli, [a.id]);
   const now = Date.now();
   const id = tx(() => {
     const r = db.prepare(`INSERT INTO tasks (title,notes,priority,due,assignee_id,created_by,created_at,updated_at,updated_by,category_id,client_id,visibility)
@@ -848,6 +885,7 @@ route('PATCH', '/api/tasks/:id', true, async (req, res, body, me, params) => {
              ('partnerIds' in body || 'visibility' in body || 'assigneeId' in body)) throw bad(NEED_PARTNER);
   if ('clientId' in body || 'assigneeId' in body || 'partnerIds' in body)
     checkIntlPeople('client_id' in sets ? sets.client_id : t.client_id, [assignee, ...(vis === 'personal' ? [] : partners)]);
+  if ('clientId' in body || 'assigneeId' in body) checkWorkArea('client_id' in sets ? sets.client_id : t.client_id, [assignee]);
   const keys = Object.keys(sets);
   tx(() => {
     if (keys.length) {
@@ -965,6 +1003,7 @@ function ruleFields(body, me, cur) {
   if ('clientId' in body || 'assigneeId' in body || 'partnerIds' in body)
     checkIntlPeople('client_id' in f ? f.client_id : cur?.client_id,
       [f.assignee_id ?? cur?.assignee_id, ...(('partner_ids' in f ? f.partner_ids : cur?.partner_ids || '').split(',').filter(Boolean).map(Number))]);
+  if ('clientId' in body || 'assigneeId' in body) checkWorkArea('client_id' in f ? f.client_id : cur?.client_id, [f.assignee_id ?? cur?.assignee_id]);
   const freq = f.frequency ?? cur?.frequency;
   if (freq === 'annual' && !(f.due_month ?? cur?.due_month)) throw bad('Choose the month the yearly task is due.');
   if (freq === 'quarterly' && !(f.months ?? cur?.months)) throw bad('Choose the months the quarterly task is due.');
