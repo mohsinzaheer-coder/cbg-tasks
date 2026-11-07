@@ -85,6 +85,11 @@ Each staff member has a **Works on** setting (Local, International, or Both) on 
 On **Recurring**, the owner can use **Import from Excel** (.xlsx or .csv). Columns: Task Name, Client Name, Assign To, Partner, Category, Repeat (Monthly / Quarterly / Yearly), Due on Day, Due In Month, Add to board this many days before due. Optional: Authorized Capital, Paid up Capital, Priority, Instructions.
 Several people go in one cell separated by commas, and names must match the People page. The import shows a preview first. Rows with a problem are listed and left out. Missing clients and categories are created, and importing the same file again skips what is already set up.
 
+## Importing clients and portal logins
+
+On **Clients**, the owner can use **Import clients** (.xlsx or .csv). Only **Client Name** is required. Optional columns: Client Type, CNIC, NTN, STRN, Email, Phone, Contact Person, Authorized Capital, Paid up Capital, Partner in charge, and logins named like **SECP ID, SECP Password, SECP PIN** (same for FBR, PRA, SRB, KPRA, BRA).
+Existing clients are matched by name: their blank details are filled in, and logins in the file replace saved ones (blank cells never erase a saved login). Passwords are never shown in the preview and are saved encrypted, so **CRED_KEY must be set** first.
+
 ## My feed and personal tasks
 
 The owner and partners have a **My feed** tab for their own to-dos. Each one is **Business** or **Personal**.

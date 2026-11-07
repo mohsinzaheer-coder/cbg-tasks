@@ -119,7 +119,7 @@
     <section id="clientsPage" class="stack-lg" hidden>
       <div class="head">
         <div><h1 id="clientsTitle">Clients</h1><p class="sub" id="clientsSub"></p></div>
-        <button class="primary" type="button" id="newClientBtn" hidden>+ Add client</button>
+        <div class="mini"><button type="button" id="importClientsBtn" hidden>Import clients</button><button class="primary" type="button" id="newClientBtn" hidden>+ Add client</button></div>
       </div>
       <div class="note warn" id="credsOff" hidden>Saving portal passwords is switched off. Ask the administrator to add a <b>CRED_KEY</b> setting on the server (see the guide).</div>
       <div class="toolbar">
@@ -320,11 +320,12 @@
 <!-- Import recurring tasks -->
 <dialog id="importDlg" class="wide-dlg import-dlg">
   <form id="importForm" class="stack" method="dialog" autocomplete="off">
-    <h2>Import recurring tasks</h2>
-    <p class="help">Upload an Excel (.xlsx) or CSV file with these columns: <b>Task Name, Client Name, Assign To, Partner, Category, Repeat, Due on Day, Due In Month, Add to board this many days before due</b>. Optional: Authorized Capital, Paid up Capital, Priority, Instructions. Several people go in one cell, separated by commas.</p>
+    <h2 id="importTitle">Import recurring tasks</h2>
+    <p class="help" id="importHelpRules">Upload an Excel (.xlsx) or CSV file with these columns: <b>Task Name, Client Name, Assign To, Partner, Category, Repeat, Due on Day, Due In Month, Add to board this many days before due</b>. Optional: Authorized Capital, Paid up Capital, Priority, Instructions. Several people go in one cell, separated by commas.</p>
+    <p class="help" id="importHelpClients" hidden>Upload an Excel (.xlsx) or CSV file with a <b>Client Name</b> column. Optional: Client Type, CNIC, NTN, STRN, Email, Phone, Contact Person, Authorized Capital, Paid up Capital, Partner in charge, and logins as <b>SECP ID, SECP Password, SECP PIN</b> (same for FBR, PRA, SRB, KPRA, BRA). Existing clients are matched by name: their blank details are filled in and logins in the file replace saved ones. Passwords stay hidden here and are saved encrypted.</p>
     <label for="importFile">File<input type="file" id="importFile" accept=".xlsx,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv"></label>
     <div id="importSummary" class="import-summary" hidden></div>
-    <div class="table-wrap import-table" id="importTableWrap" hidden><table class="table"><thead><tr><th>Row</th><th>Task</th><th>Client</th><th>Result</th></tr></thead><tbody id="importRows"></tbody></table></div>
+    <div class="table-wrap import-table" id="importTableWrap" hidden><table class="table"><thead><tr><th>Row</th><th id="importColA">Task</th><th id="importColB">Client</th><th>Result</th></tr></thead><tbody id="importRows"></tbody></table></div>
     <p class="form-error" id="importError" role="alert" hidden></p>
     <div class="dlg-actions"><button type="button" class="ghost" data-close>Cancel</button><button class="primary" type="submit" id="importGo" disabled>Import</button></div>
   </form>

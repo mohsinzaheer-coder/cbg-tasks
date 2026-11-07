@@ -829,6 +829,82 @@ route('GET', '/api/clients/:id/access-log', true, async (req, res, body, me, par
   send(res, 200, { log: rows.map(r => ({ authority: r.authority, at: r.viewed_at, name: r.name })) });
 });
 
+/* ---- import clients and their portal logins from a spreadsheet (owner) ----
+ * Same two steps as the recurring import: commit=false previews, commit=true saves.
+ * Passwords and PINs are never sent back to the page; they are encrypted as they are saved. */
+route('POST', '/api/clients/import', true, async (req, res, body, me) => {
+  if (me.role !== 'owner') throw new HttpError(403, 'Only the owner can import clients.');
+  if (!Array.isArray(body.rows) || !body.rows.length) throw bad('The file has no rows to import.');
+  if (body.rows.length > 3000) throw bad('Import up to 3,000 rows at a time.');
+  const existing = new Map(db.prepare("SELECT * FROM clients WHERE scope <> 'intl'").all().map(c => [norm(c.name), c]));
+  const partnersByName = new Map(db.prepare("SELECT id, name FROM users WHERE role = 'partner' AND active = 1 AND deleted = 0").all().map(u => [norm(u.name), u]));
+  const seen = new Map(); const plan = [];
+  const results = body.rows.map((row, i) => {
+    const errors = [], notes = []; const line = Number(row.line) || i + 1;
+    const name = String(row.name ?? '').replace(/\s+/g, ' ').trim().slice(0, 120);
+    if (!name) errors.push('Client name is empty');
+    const typeRaw = norm(row.entityType); const entityType = ENTITY_TYPES.find(t => t.toLowerCase() === typeRaw) || (typeRaw ? null : 'Company');
+    if (!entityType) errors.push(`Client type must be ${ENTITY_TYPES.join(', ')}`);
+    const fields = {};
+    for (const [k, col, max] of [['cnic', 'cnic', 20], ['ntn', 'ntn', 30], ['strn', 'strn', 30], ['email', 'email', 120], ['phone', 'phone', 40], ['contactPerson', 'contact_person', 80]]) {
+      const val = String(row[k] ?? '').trim(); if (val) fields[col] = val.slice(0, max);
+    }
+    for (const [k, col] of [['authorizedCapital', 'authorized_capital'], ['paidUpCapital', 'paid_up_capital']]) { const val = cleanMoney(row[k]); if (val) fields[col] = val; }
+    let managerId;
+    if (String(row.partner ?? '').trim()) { const p = partnersByName.get(norm(row.partner)); if (!p) errors.push(`No partner called "${row.partner}"`); else managerId = p.id; }
+    const logins = [];
+    for (const a of AUTHORITIES) {
+      const l = row.logins?.[a]; if (!l) continue;
+      const id = String(l.id ?? '').trim().slice(0, 80), pw = String(l.password ?? ''), pin = String(l.pin ?? '').trim();
+      if (!id && !pw && !pin) continue;
+      if ((pw || pin) && !CRED_KEY) { errors.push('Saving portal passwords is switched off: CRED_KEY is not set on the server'); break; }
+      if (pw.length > 200 || pin.length > 50) { errors.push(`${a} password or PIN is too long`); continue; }
+      logins.push({ a, id, pw, pin });
+    }
+    const key = norm(name); const client = existing.get(key);
+    let status = errors.length ? 'error' : 'ok';
+    if (status === 'ok' && seen.has(key)) { status = 'skip'; notes.push(`Same client as row ${seen.get(key)}; only the first is imported`); }
+    if (name && !seen.has(key)) seen.set(key, line);
+    if (status === 'ok') {
+      if (client) {
+        notes.push('Existing client: blank details will be filled in');
+        for (const l of logins) if (db.prepare('SELECT 1 FROM client_logins WHERE client_id = ? AND authority = ?').get(client.id, l.a)) notes.push(`Saved ${l.a} login will be replaced`);
+      } else notes.push('New client');
+      if (logins.length) notes.push('Logins: ' + logins.map(l => l.a + (l.pw ? ' (with password' + (l.pin ? ' and PIN)' : ')') : '')).join(', '));
+      plan.push({ key, name, entityType, fields, managerId, logins, client });
+    }
+    return { line, name, status, errors, notes };
+  });
+  const summary = { ok: plan.length, skip: results.filter(r => r.status === 'skip').length, error: results.filter(r => r.status === 'error').length,
+    newClients: plan.filter(p => !p.client).length, logins: plan.reduce((n, p) => n + p.logins.length, 0) };
+  if (!body.commit) return send(res, 200, { results, summary });
+  if (!plan.length) throw bad('There is nothing to import. Fix the rows marked with a problem and try again.');
+  tx(() => {
+    const now = Date.now();
+    for (const p of plan) {
+      let id = p.client?.id;
+      if (!id) {
+        const cols = { name: p.name, entity_type: p.entityType, scope: 'local', ...p.fields, ...(p.managerId ? { manager_id: p.managerId } : {}) };
+        const k = Object.keys(cols);
+        id = Number(db.prepare(`INSERT INTO clients (${k.join(',')}, created_at, updated_at) VALUES (${k.map(() => '?').join(',')}, ?, ?)`).run(...k.map(x => cols[x]), now, now).lastInsertRowid);
+      } else {
+        for (const [col, val] of Object.entries(p.fields)) db.prepare(`UPDATE clients SET ${col} = ? WHERE id = ? AND ${col} = ''`).run(val, id);
+        if (p.managerId) db.prepare('UPDATE clients SET manager_id = ? WHERE id = ? AND manager_id IS NULL').run(p.managerId, id);
+        db.prepare('UPDATE clients SET updated_at = ? WHERE id = ?').run(now, id);
+      }
+      for (const l of p.logins)
+        db.prepare(`INSERT INTO client_logins (client_id, authority, login_id, secret_enc, pin_enc, updated_at, updated_by) VALUES (?,?,?,?,?,?,?)
+                    ON CONFLICT(client_id, authority) DO UPDATE SET
+                      login_id = CASE WHEN excluded.login_id = '' THEN client_logins.login_id ELSE excluded.login_id END,
+                      secret_enc = CASE WHEN excluded.secret_enc = '' THEN client_logins.secret_enc ELSE excluded.secret_enc END,
+                      pin_enc = CASE WHEN excluded.pin_enc = '' THEN client_logins.pin_enc ELSE excluded.pin_enc END,
+                      updated_at = excluded.updated_at, updated_by = excluded.updated_by`)
+          .run(id, l.a, l.id, encrypt(l.pw), encrypt(l.pin), now, me.id); // blank cells never wipe a saved login
+    }
+  });
+  send(res, 200, { results, summary, imported: plan.length });
+});
+
 /* ---- tasks ---- */
 route('GET', '/api/tasks', true, async (req, res, body, me) => {
   const pm = partnerMap(); const am = assigneeMap(); const ctx = intlCtx(me);

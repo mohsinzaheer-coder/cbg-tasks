@@ -103,6 +103,7 @@
     $('#newPersonBtn').textContent = me.role === 'owner' ? '+ Add person' : '+ Add staff member';
     $('#catPanel').hidden = me.role !== 'owner';
     $('#importRulesBtn').hidden = me.role !== 'owner';
+    $('#importClientsBtn').hidden = me.role !== 'owner';
     if ((!lead() && ['recurring', 'feed'].includes(state.tab)) || (!mgmt() && state.tab === 'people')) state.tab = 'tasks';
     setTab(state.tab);
     await refresh();
@@ -627,6 +628,7 @@
       ? (state.me.role === 'owner' ? 'Each international client is visible only to you and the partners and staff listed on it.' : 'International clients you have been given access to. Only the people listed on each client can see it.')
       : ({ owner: 'All clients, their registrations and portal logins.', partner: 'All clients and their portal logins. You can edit the clients you are in charge of.', staff: 'Clients you work on.' }[state.me.role] || '');
     $('#newClientBtn').textContent = intl ? '+ Add international client' : '+ Add client';
+    $('#importClientsBtn').hidden = intl || state.me.role !== 'owner';
     $('#cSearch').placeholder = intl ? 'Name, code, country or tax ID' : 'Name, code, NTN or STRN';
     const items = filteredClients();
     const anyInScope = state.clients.some(c => c.scope === state.clientScope);
@@ -1152,57 +1154,80 @@
   const COLS = [['title', /^task( name)?$/], ['client', /^client( name)?$/], ['authorizedCapital', /^authori[sz]ed capital/], ['paidUpCapital', /^paid[- ]?up capital/],
     ['assignTo', /^assign(ed)? to/], ['partners', /^partners?( involved)?$/], ['category', /^(task )?category/], ['repeat', /^repeats?$/], ['dueDay', /^due on day/],
     ['dueMonth', /^due in month/], ['leadDays', /^add to board|days before/], ['priority', /^priority/], ['instructions', /^(instructions|notes)/]];
-  function sheetToRows(raw) {
-    const h = raw.findIndex(r => r.vals.some(v => /^task( name)?$/i.test(String(v ?? '').trim())));
-    if (h < 0) throw new Error('Could not find the header row. The sheet needs a "Task Name" column.');
-    const map = {};
-    raw[h].vals.forEach((v, i) => { const k = String(v ?? '').trim().toLowerCase(); const m = COLS.find(([, re]) => re.test(k)); if (m && !(m[0] in map)) map[m[0]] = i; });
-    for (const need of ['client', 'assignTo', 'repeat', 'dueDay']) if (!(need in map)) throw new Error(`The sheet is missing the column for ${need === 'assignTo' ? 'Assign To' : need === 'dueDay' ? 'Due on Day' : need[0].toUpperCase() + need.slice(1)}.`);
+  const CLIENT_COLS = [['name', /^(client( name)?|name)$/], ['entityType', /^(client )?type$/], ['cnic', /^cnic/], ['ntn', /^ntn/], ['strn', /^strn/], ['email', /^e-?mail/],
+    ['phone', /^(phone|mobile|cell|contact (no|number))/], ['contactPerson', /^contact person/], ['authorizedCapital', /^authori[sz]ed capital/], ['paidUpCapital', /^paid[- ]?up capital/],
+    ['partner', /^partner( in charge)?$/]];
+  const PORTAL_RE = /^(fbr|pra|srb|kpra|bra|secp)\s*(id|user ?id|login|login id|user|password|pass|pin)$/;
+  function sheetToRows(raw, mode) {
+    const keyRe = mode === 'clients' ? /^(client( name)?|name)$/i : /^task( name)?$/i;
+    const h = raw.findIndex(r => r.vals.some(v => keyRe.test(String(v ?? '').trim())));
+    if (h < 0) throw new Error(`Could not find the header row. The sheet needs a "${mode === 'clients' ? 'Client Name' : 'Task Name'}" column.`);
+    const map = {}, portals = {};
+    raw[h].vals.forEach((v, i) => {
+      const k = String(v ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
+      const pm = mode === 'clients' && k.match(PORTAL_RE);
+      if (pm) { const a = pm[1].toUpperCase(), f = /pass/.test(pm[2]) ? 'password' : pm[2] === 'pin' ? 'pin' : 'id'; (portals[a] ||= {})[f] ??= i; return; }
+      const m = (mode === 'clients' ? CLIENT_COLS : COLS).find(([, re]) => re.test(k)); if (m && !(m[0] in map)) map[m[0]] = i;
+    });
+    if (mode !== 'clients') for (const need of ['client', 'assignTo', 'repeat', 'dueDay']) if (!(need in map)) throw new Error(`The sheet is missing the column for ${need === 'assignTo' ? 'Assign To' : need === 'dueDay' ? 'Due on Day' : need[0].toUpperCase() + need.slice(1)}.`);
     return raw.slice(h + 1).filter(r => r.vals.some(v => String(v ?? '').trim())).map(r => {
-      const o = { line: r.line }; for (const [k, i] of Object.entries(map)) o[k] = String(r.vals[i] ?? '').trim(); return o;
+      const o = { line: r.line }; for (const [k, i] of Object.entries(map)) o[k] = String(r.vals[i] ?? '').trim();
+      if (mode === 'clients') { o.logins = {}; for (const [a, f] of Object.entries(portals)) o.logins[a] = Object.fromEntries(Object.entries(f).map(([k, i]) => [k, String(r.vals[i] ?? '').trim()])); }
+      return o;
     });
   }
-  let importRows = null;
+  let importRows = null, importMode = 'rules';
+  const importUrl = () => importMode === 'clients' ? '/api/clients/import' : '/api/recurring/import';
   function showImport(res) {
     const s = res.summary, sum = $('#importSummary'); sum.replaceChildren(); sum.hidden = false;
     const line = (n, label, cls) => { if (!n) return; const d = el('span', 'imp-pill ' + cls); d.append(el('b', null, String(n)), document.createTextNode(' ' + label)); sum.append(d); };
-    line(s.ok, s.ok === 1 ? 'recurring task ready' : 'recurring tasks ready', 'ok'); line(s.skip, 'skipped', 'skip'); line(s.error, s.error === 1 ? 'row has a problem' : 'rows have a problem', 'err');
-    line(s.newClients, s.newClients === 1 ? 'new client will be added' : 'new clients will be added', 'info'); line(s.newCategories, 'new categories', 'info');
+    const what = importMode === 'clients' ? ['client ready', 'clients ready'] : ['recurring task ready', 'recurring tasks ready'];
+    line(s.ok, s.ok === 1 ? what[0] : what[1], 'ok'); line(s.skip, 'skipped', 'skip'); line(s.error, s.error === 1 ? 'row has a problem' : 'rows have a problem', 'err');
+    line(s.newClients, s.newClients === 1 ? 'new client will be added' : 'new clients will be added', 'info'); line(s.newCategories, 'new categories', 'info'); line(s.logins, s.logins === 1 ? 'portal login' : 'portal logins', 'info');
     const tb = $('#importRows'); tb.replaceChildren();
     const order = { error: 0, skip: 1, ok: 2 };
     for (const r of [...res.results].sort((a, b) => order[a.status] - order[b.status] || a.line - b.line)) {
       const tr = el('tr', 'imp-' + r.status);
-      tr.append(el('td', null, String(r.line)), el('td', null, r.title || '—'), el('td', null, r.client || '—'));
+      tr.append(el('td', null, String(r.line)), el('td', null, (importMode === 'clients' ? r.name : r.title) || '—'));
+      if (importMode !== 'clients') tr.append(el('td', null, r.client || '—'));
       const td = el('td'); td.append(el('span', 'st-pill imp-' + r.status, { ok: 'Ready', skip: 'Skipped', error: 'Problem' }[r.status]));
       for (const m of [...r.errors, ...r.notes]) td.append(el('small', null, m));
       tr.append(td); tb.append(tr);
     }
     $('#importTableWrap').hidden = false;
     $('#importGo').disabled = !s.ok;
-    $('#importGo').textContent = s.ok ? `Import ${s.ok} recurring task${s.ok === 1 ? '' : 's'}` : 'Nothing to import';
+    $('#importGo').textContent = s.ok ? `Import ${s.ok} ${importMode === 'clients' ? 'client' : 'recurring task'}${s.ok === 1 ? '' : 's'}` : 'Nothing to import';
   }
-  $('#importRulesBtn').onclick = () => {
+  function openImport(mode) {
+    importMode = mode; const c = mode === 'clients';
+    $('#importTitle').textContent = c ? 'Import clients' : 'Import recurring tasks';
+    $('#importHelpRules').hidden = c; $('#importHelpClients').hidden = !c;
+    $('#importColA').textContent = c ? 'Client' : 'Task'; $('#importColB').hidden = c;
     $('#importForm').reset(); importRows = null; showErr('#importError');
     $('#importSummary').hidden = true; $('#importTableWrap').hidden = true; $('#importGo').disabled = true; $('#importGo').textContent = 'Import';
     $('#importDlg').showModal();
-  };
+  }
+  $('#importRulesBtn').onclick = () => openImport('rules');
+  $('#importClientsBtn').onclick = () => openImport('clients');
   $('#importFile').addEventListener('change', async () => {
     const f = $('#importFile').files[0]; showErr('#importError'); $('#importGo').disabled = true; importRows = null;
     if (!f) return;
     try {
       const raw = /\.csv$/i.test(f.name) ? readCsv(await f.text()) : await readXlsx(await f.arrayBuffer());
-      importRows = sheetToRows(raw);
+      importRows = sheetToRows(raw, importMode);
       if (!importRows.length) throw new Error('The sheet has a header row but no tasks under it.');
-      showImport(await api('POST', '/api/recurring/import', { rows: importRows, commit: false }));
+      showImport(await api('POST', importUrl(), { rows: importRows, commit: false }));
     } catch (err) { importRows = null; $('#importSummary').hidden = true; $('#importTableWrap').hidden = true; showErr('#importError', err.message); }
   });
   $('#importForm').addEventListener('submit', async e => {
     e.preventDefault(); if (!importRows) return;
     const b = $('#importGo'); b.disabled = true; b.textContent = 'Importing…';
     try {
-      const res = await api('POST', '/api/recurring/import', { rows: importRows, commit: true });
+      const res = await api('POST', importUrl(), { rows: importRows, commit: true });
       $('#importDlg').close(); await refresh();
-      toast(`Imported ${res.imported} recurring task${res.imported === 1 ? '' : 's'}` + (res.tasksCreated ? `. ${res.tasksCreated} added to the task board now.` : '.'));
+      toast(importMode === 'clients' ? `Imported ${res.imported} client${res.imported === 1 ? '' : 's'}${res.summary.logins ? ' with ' + res.summary.logins + ' portal logins' : ''}.`
+        : `Imported ${res.imported} recurring task${res.imported === 1 ? '' : 's'}` + (res.tasksCreated ? `. ${res.tasksCreated} added to the task board now.` : '.'));
+      importRows = null; $('#importFile').value = '';
     } catch (err) { showErr('#importError', err.message); b.disabled = false; b.textContent = 'Try again'; }
   });
 
