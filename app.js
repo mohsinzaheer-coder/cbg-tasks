@@ -231,6 +231,45 @@
   }
   // "Me" for my own part; every assignee is listed when a task is shared
   const whoText = t => t.assigneeIds.map((id, i) => id === state.me.id ? 'Me' : (t.assigneeNames?.[i] || userById(id)?.name || '')).filter(Boolean).join(', ') || t.assigneeName;
+  /* Table columns: each can be sorted by clicking its heading and filtered from the box under it */
+  const addDays = (iso, n) => { const d = new Date(iso + 'T00:00:00'); d.setDate(d.getDate() + n); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
+  const clientOrProject = t => t.visibility === 'personal' ? (t.projectName || '') : (t.clientName || '');
+  const DUE_FILTERS = [['', 'Any date'], ['overdue', 'Overdue'], ['today', 'Due today'], ['week', 'Next 7 days'], ['month', 'This month'], ['none', 'No due date']];
+  const TCOLS = [
+    { key: 'task', label: 'Task', text: t => `${t.title} ${t.notes} ${t.progress}`, sort: t => t.title.toLowerCase() },
+    { key: 'client', label: 'Client', text: clientOrProject, sort: t => clientOrProject(t).toLowerCase() || '\uffff' },
+    { key: 'category', label: 'Category', text: t => t.categoryName, sort: t => (t.categoryName || '\uffff').toLowerCase() },
+    { key: 'who', label: 'Assigned to', text: t => `${whoText(t)} ${t.assigneeName} ${t.createdByName}`, sort: t => whoText(t).toLowerCase() },
+    { key: 'partners', label: 'Partners', text: t => t.partnerNames.join(', '), sort: t => (t.partnerNames.join(', ') || '\uffff').toLowerCase() },
+    { key: 'priority', label: 'Priority', options: [['', 'Any'], ['high', 'High'], ['medium', 'Medium'], ['low', 'Low']], match: (t, v) => t.priority === v, sort: t => PRI[t.priority] },
+    { key: 'due', label: 'Due', options: DUE_FILTERS, sort: t => t.due || '9999',
+      match: (t, v) => { const d = t.due, td = today();
+        return v === 'none' ? !d : v === 'overdue' ? isLate(t) : !d ? false : v === 'today' ? d === td : v === 'week' ? d >= td && d <= addDays(td, 7) : d.slice(0, 7) === td.slice(0, 7); } },
+    { key: 'status', label: 'Status', options: [['', 'Any'], ...STATUS], match: (t, v) => t.status === v, sort: t => ({ todo: 0, doing: 1, done: 2 })[t.status] },
+  ];
+  const colState = {}; // per table: { sort: {key, dir}, f: {key: value} }
+  const colsFor = id => colState[id] || (colState[id] = { sort: null, f: {} });
+  function applyCols(id, tasks) {
+    const cs = colsFor(id);
+    for (const c of TCOLS) {
+      const v = cs.f[c.key]; if (!v) continue;
+      if (c.options) tasks = tasks.filter(t => c.match(t, v));
+      else { const q = v.trim().toLowerCase(); if (q) tasks = tasks.filter(t => (c.text(t) || '').toLowerCase().includes(q)); }
+    }
+    return tasks;
+  }
+  function sortByCol(id, list) {
+    const s = colsFor(id).sort; if (!s) return list;
+    const c = TCOLS.find(x => x.key === s.key); const m = s.dir === 'asc' ? 1 : -1;
+    return list.slice().sort((a, b) => { const x = c.sort(a), y = c.sort(b); return (x < y ? -1 : x > y ? 1 : 0) * m; });
+  }
+  // Re-render after typing in a filter box, putting the cursor back where it was
+  function redrawKeepFocus(host) {
+    const a = document.activeElement; const col = a?.dataset?.colf; const pos = a?.selectionStart;
+    renderBoards();
+    if (!col) return; const n = $('#' + host.id)?.querySelector(`[data-colf="${col}"]`);
+    if (n) { n.focus(); if (pos != null && n.setSelectionRange) n.setSelectionRange(pos, pos); }
+  }
   function drawLanes(host, tasks, emptyText) {
     host.className = 'task-host'; host.replaceChildren();
     const cur = statusTab[host.id] || 'all';
@@ -250,6 +289,8 @@
       }
       host.append(grid); return;
     }
+    const cs = colsFor(host.id); const nFilters = Object.values(cs.f).filter(v => v && v.trim()).length;
+    tasks = applyCols(host.id, tasks);
     const counts = { todo: 0, doing: 0, done: 0, all: tasks.length };
     for (const t of tasks) counts[t.status]++;
     const bar = el('div', 'tt-bar');
@@ -259,21 +300,48 @@
       b.setAttribute('role', 'tab'); b.setAttribute('aria-selected', cur === key);
       b.append(el('span', 'st-count', String(counts[key]))); tabs.append(b);
     }
-    bar.append(tabs, viewToggle()); host.append(bar);
+    bar.append(tabs);
+    if (nFilters || cs.sort) {
+      const note = el('span', 'filter-note');
+      note.append(document.createTextNode([nFilters ? `${nFilters} column filter${nFilters > 1 ? 's' : ''}` : '', cs.sort ? 'sorted by ' + TCOLS.find(c => c.key === cs.sort.key).label.toLowerCase() : ''].filter(Boolean).join(', ') + ' '));
+      note.append(btn('Clear', 'link', () => { colState[host.id] = { sort: null, f: {} }; renderBoards(); })); bar.append(note);
+    }
+    bar.append(viewToggle()); host.append(bar);
     if (cur === 'open' || cur === 'overdue') {
       const note = el('span', 'filter-note'); note.append(document.createTextNode('Showing ' + STATUS_LABEL[cur].toLowerCase() + ' tasks '));
       note.append(btn('Show all', 'link', () => { statusTab[host.id] = 'all'; renderBoards(); })); bar.insertBefore(note, bar.lastChild);
     }
-    let list = sortTasks(tasks.filter(t => inStatus(t, cur)), cur === 'open' || cur === 'overdue' ? 'all' : cur);
+    let list = sortByCol(host.id, sortTasks(tasks.filter(t => inStatus(t, cur)), cur === 'open' || cur === 'overdue' ? 'all' : cur));
     const total = list.length;
     if (cur === 'done' || cur === 'all') list = list.slice(0, 200);
-    if (!list.length) { host.append(el('div', 'lane-empty', !tasks.length && emptyText ? emptyText : `No ${cur === 'all' ? '' : STATUS_LABEL[cur].toLowerCase() + ' '}tasks here.`)); return; }
+    if (!list.length && !nFilters) { host.append(el('div', 'lane-empty', !tasks.length && emptyText ? emptyText : `No ${cur === 'all' ? '' : STATUS_LABEL[cur].toLowerCase() + ' '}tasks here.`)); return; }
     const wrap = el('div', 'table-wrap'); const table = el('table', 'table tasks-table');
-    const thead = el('thead'); const hr = el('tr');
-    const hasProj = tasks.some(t => t.visibility === 'personal');
-    for (const h of ['Task', hasProj ? 'Client / Project' : 'Client', 'Category', 'Assigned to', 'Partners', 'Priority', 'Due', 'Status', '']) hr.append(el('th', null, h));
-    thead.append(hr); table.append(thead);
-    const tb = el('tbody'); for (const t of list) tb.append(taskRow(t)); table.append(tb);
+    const thead = el('thead'); const hr = el('tr'); const fr = el('tr', 'col-filters');
+    const hasProj = host.id !== 'lanes' || tasks.some(t => t.visibility === 'personal');
+    for (const c of TCOLS) {
+      const th = el('th'); const on = cs.sort?.key === c.key;
+      const label = c.key === 'client' && hasProj ? 'Client / Project' : c.label;
+      const b = btn(label, 'th-sort' + (on ? ' on' : ''), () => {
+        cs.sort = !on ? { key: c.key, dir: 'asc' } : cs.sort.dir === 'asc' ? { key: c.key, dir: 'desc' } : null; renderBoards();
+      });
+      b.append(el('span', 'sort-ic', on ? (cs.sort.dir === 'asc' ? '▲' : '▼') : '↕'));
+      b.title = 'Sort by ' + label.toLowerCase();
+      th.setAttribute('aria-sort', on ? (cs.sort.dir === 'asc' ? 'ascending' : 'descending') : 'none');
+      th.append(b); hr.append(th);
+      const fth = el('th'); let f;
+      if (c.options) { f = el('select'); for (const [v, t] of c.options) opt(f, v, t); f.value = cs.f[c.key] || ''; f.onchange = () => { cs.f[c.key] = f.value; redrawKeepFocus(host); }; }
+      else {
+        f = el('input'); f.type = 'search'; f.placeholder = 'Filter'; f.value = cs.f[c.key] || '';
+        let timer; f.oninput = () => { clearTimeout(timer); timer = setTimeout(() => { cs.f[c.key] = f.value; redrawKeepFocus(host); }, 200); };
+      }
+      f.dataset.colf = c.key; f.className = 'col-filter' + (cs.f[c.key] ? ' on' : ''); f.setAttribute('aria-label', 'Filter ' + label.toLowerCase());
+      fth.append(f); fr.append(fth);
+    }
+    hr.append(el('th')); fr.append(el('th'));
+    thead.append(hr, fr); table.append(thead);
+    const tb = el('tbody'); for (const t of list) tb.append(taskRow(t));
+    if (!list.length) { const tr = el('tr'); const td = el('td', 'lane-empty', 'No tasks match these column filters.'); td.colSpan = TCOLS.length + 1; tr.append(td); tb.append(tr); }
+    table.append(tb);
     wrap.append(table); host.append(wrap);
     if (total > list.length) host.append(el('p', 'help', `Showing ${list.length} of ${total}. Use the filters or search to narrow it down.`));
   }

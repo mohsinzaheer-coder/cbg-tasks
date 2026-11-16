@@ -64,7 +64,7 @@ button:disabled{opacity:.55;cursor:wait}
 .me-id{display:flex;flex-direction:column;align-items:flex-end;margin-right:6px}
 .me-id b{font-weight:600}
 .role{font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--gold)}
-@media (max-width:720px){.me-id{align-items:flex-start}.tabs{order:3;width:100%}}
+@media (max-width:720px){.me-id{align-items:flex-start}.tabs{order:3;width:100%;min-width:0;overflow-x:auto;scrollbar-width:none}.tabs button{flex:none}}
 
 .page{max-width:1320px;margin:0 auto;padding:24px max(16px,env(safe-area-inset-right,0px)) 56px max(16px,env(safe-area-inset-left,0px))}
 .head{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:flex-end;gap:12px}
@@ -329,3 +329,15 @@ button.stat.on{border-color:var(--gold);background:var(--gold-soft);box-shadow:i
 .addnew{display:flex;flex-direction:column;gap:6px;padding:10px 12px;border:1px dashed var(--gold, #c9a227);border-radius:10px}
 .addnew-row{display:flex;gap:8px;flex-wrap:wrap}
 .addnew-row input{flex:1 1 180px;min-width:0}
+
+/* sortable headings and per-column filters on task tables */
+.tasks-table th{vertical-align:bottom}
+.th-sort{all:unset;cursor:pointer;display:inline-flex;align-items:center;gap:5px;font:inherit;text-transform:inherit;letter-spacing:inherit;color:inherit}
+.th-sort:hover,.th-sort.on{color:var(--text)}
+.th-sort:focus-visible{outline:2px solid var(--gold, #c9a227);outline-offset:2px;border-radius:3px}
+.sort-ic{font-size:.7rem;opacity:.55}
+.th-sort.on .sort-ic{opacity:1;color:var(--gold, #c9a227)}
+.tasks-table tr.col-filters th{padding:0 8px 10px;text-transform:none;letter-spacing:0;border-bottom:1px solid var(--line)}
+.tasks-table thead tr:first-child th{border-bottom:0}
+.col-filter{width:100%;min-width:0;box-sizing:border-box;font-size:.82rem;padding:5px 7px;border:1px solid var(--line);border-radius:7px;background:var(--surface, #fff);color:var(--text)}
+.col-filter.on{border-color:var(--gold, #c9a227);background:var(--gold-soft)}
