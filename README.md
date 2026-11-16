@@ -80,6 +80,11 @@ Each staff member has a **Works on** setting (Local, International, or Both) on 
 
 In table view (Tasks and My feed), click any column heading to sort by it: once for A→Z or earliest first, again to reverse, a third time to go back to the normal order. The row under the headings has a filter for each column: type in Task, Client / Project, Category, Assigned to or Partners, or pick a Priority, Due (Overdue, Due today, Next 7 days, This month, No due date) or Status. **Clear** next to the status tabs resets them.
 
+## Done tasks are locked
+
+When a task is marked **Done**, the date (and who marked it) shows in the **Done on** column. From then on the people who did the task can no longer change its status.
+Only the owner, or the partner who assigned the task, can move it back to To do or In progress, and they must give a reason. The reason, who changed it and when are shown on the task. For a task a staff member added for himself, his partner can reopen it. Every status change is recorded.
+
 ## Tasks for several people
 
 **Assign to** is a tick list: tick one or more people. A task given to several people is one shared task. Everyone on it sees it and can update its status and notes, and when anyone marks it Done it is done for all.

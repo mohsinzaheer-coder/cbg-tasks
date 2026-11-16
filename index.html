@@ -213,6 +213,18 @@
   </form>
 </dialog>
 
+<!-- Change the status of a done task (needs a reason) -->
+<dialog id="reopenDlg">
+  <form id="reopenForm" class="stack" method="dialog" autocomplete="off">
+    <h2>Change status of a done task</h2>
+    <p class="help" id="reopenFor"></p>
+    <label for="roStatus">Move it to<select id="roStatus"><option value="todo">To do</option><option value="doing">In progress</option></select></label>
+    <label for="roReason">Reason for the change <em class="req">(required)</em><textarea id="roReason" maxlength="500" rows="3" required placeholder="e.g. FBR rejected the return, needs to be filed again"></textarea></label>
+    <p class="error" id="reopenError" role="alert" hidden></p>
+    <div class="dlg-actions"><button type="button" class="ghost" data-close>Cancel</button><button class="primary" type="submit" id="roSave">Change status</button></div>
+  </form>
+</dialog>
+
 <!-- Client dialog -->
 <dialog id="clientDlg" class="wide-dlg">
   <form id="clientForm" class="stack" method="dialog" autocomplete="off">

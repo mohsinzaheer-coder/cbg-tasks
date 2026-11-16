@@ -145,6 +145,10 @@ CREATE TABLE IF NOT EXISTS recurring (
            CREATE TABLE IF NOT EXISTS personal_projects (id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id), name TEXT NOT NULL COLLATE NOCASE, UNIQUE(user_id, name));`);
   add('pcat_id', 'INTEGER REFERENCES personal_categories(id) ON DELETE SET NULL');
   add('project_id', 'INTEGER REFERENCES personal_projects(id) ON DELETE SET NULL');
+  // Version 2.18: every status change is logged; reopening a done task needs a reason
+  db.exec(`CREATE TABLE IF NOT EXISTS task_status_log (id INTEGER PRIMARY KEY, task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+             user_id INTEGER NOT NULL REFERENCES users(id), at INTEGER NOT NULL, from_status TEXT NOT NULL, to_status TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '');
+           CREATE INDEX IF NOT EXISTS task_status_log_task ON task_status_log(task_id);`);
   db.exec('CREATE INDEX IF NOT EXISTS tasks_client ON tasks(client_id)');
   const rcols = db.prepare('PRAGMA table_info(recurring)').all().map(c => c.name);
   if (!rcols.includes('partner_ids')) db.exec("ALTER TABLE recurring ADD COLUMN partner_ids TEXT NOT NULL DEFAULT ''");
@@ -440,6 +444,22 @@ function canEditTask(me, t) {
   if (me.role === 'partner') { const team = teamIds(me); return aIds(t).some(id => id !== me.id && team.includes(id)); }
   return false;
 }
+/* Once a task is Done, the people who did it can no longer change its status.
+ * Only the owner, or the partner who gave the task, can move it back (with a reason).
+ * For a task a staff member added for himself, his partner can. */
+function canReopen(me, t) {
+  if (t.visibility === 'personal') return t.created_by === me.id;
+  if (me.role === 'owner') return true;
+  if (me.role !== 'partner') return false;
+  const creator = db.prepare('SELECT role FROM users WHERE id = ?').get(t.created_by);
+  if (creator && creator.role !== 'staff') return t.created_by === me.id;
+  const team = teamIds(me); return aIds(t).some(id => team.includes(id));
+}
+function reopenedBy(t) {
+  const r = db.prepare(`SELECT l.at, l.reason, l.to_status, u.name FROM task_status_log l JOIN users u ON u.id = l.user_id
+                        WHERE l.task_id = ? AND l.from_status = 'done' AND l.to_status <> 'done' ORDER BY l.id DESC LIMIT 1`).get(t.id);
+  return r ? { at: r.at, reason: r.reason, to: r.to_status, byName: r.name } : null;
+}
 function taskOut(t, me, partners) {
   const ps = partners ?? taskPartners(t.id);
   return {
@@ -450,6 +470,7 @@ function taskOut(t, me, partners) {
     recurringId: t.recurring_id, period: t.period, visibility: t.visibility || 'business',
     partnerIds: ps.map(p => p.id), partnerNames: ps.map(p => p.name),
     createdAt: t.created_at, updatedAt: t.updated_at, doneAt: t.done_at, canEdit: canEditTask(me, t),
+    canReopen: canReopen(me, t), lastReopen: reopenedBy(t), doneByName: t.status === 'done' ? (db.prepare("SELECT u.name FROM task_status_log l JOIN users u ON u.id = l.user_id WHERE l.task_id = ? AND l.to_status = 'done' ORDER BY l.id DESC LIMIT 1").get(t.id)?.name || '') : '',
     canDelete: canDeleteTask(me, t), selfAdded: t.created_by === t.assignee_id && aList(t).length === 1,
   };
 }
@@ -1027,12 +1048,18 @@ route('POST', '/api/tasks', true, async (req, res, body, me) => {
 route('PATCH', '/api/tasks/:id', true, async (req, res, body, me, params) => {
   const t = db.prepare(TASK_SELECT + ' WHERE t.id = ?').get(Number(params.id));
   if (!visibleTask(me, t)) throw new HttpError(404, 'Task not found.');
-  const full = canEditTask(me, t); const sets = {};
+  const full = canEditTask(me, t); const sets = {}; let statusLog = null;
   const curPeople = aIds(t); const mine = curPeople.includes(me.id);
   if ('status' in body) {
     if (!['todo', 'doing', 'done'].includes(body.status)) throw bad('Unknown status.');
     if (!full && !mine) throw new HttpError(403, 'You can only update your own tasks.');
-    sets.status = body.status; sets.done_at = body.status === 'done' ? Date.now() : null;
+    if (t.status === 'done' && body.status !== 'done') {
+      if (!canReopen(me, t)) throw new HttpError(403, `This task is done, so its status is locked. Only ${t.creator_name && t.created_by !== me.id ? t.creator_name + ' (who assigned it)' : 'the partner who assigned it'} or the owner can change it.`);
+      const reason = str(body.reason, 500, 'Reason');
+      if (!reason) throw bad('Give a reason for changing the status of a done task.');
+      statusLog = { from: 'done', to: body.status, reason };
+    } else if (t.status !== body.status) statusLog = { from: t.status, to: body.status, reason: '' };
+    if (t.status !== body.status) { sets.status = body.status; sets.done_at = body.status === 'done' ? Date.now() : null; }
   }
   if ('progress' in body) {
     if (!full && !mine) throw new HttpError(403, 'You can only update your own tasks.');
@@ -1091,6 +1118,7 @@ route('PATCH', '/api/tasks/:id', true, async (req, res, body, me, params) => {
     }
     if (changingPeople) setTaskAssignees(t.id, people);
     if ('partnerIds' in body || vis === 'personal' || changingPeople) setTaskPartners(t.id, partners);
+    if (statusLog) db.prepare('INSERT INTO task_status_log (task_id, user_id, at, from_status, to_status, reason) VALUES (?,?,?,?,?,?)').run(t.id, me.id, Date.now(), statusLog.from, statusLog.to, statusLog.reason);
   });
   send(res, 200, { task: taskOut(db.prepare(TASK_SELECT + ' WHERE t.id = ?').get(t.id), me) });
 });

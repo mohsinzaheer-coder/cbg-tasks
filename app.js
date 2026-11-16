@@ -38,6 +38,9 @@
   const fmtTime = ms => new Date(ms).toLocaleString(undefined, { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' });
   const money = v => /^\d+(\.\d+)?$/.test(v || '') ? 'Rs ' + Number(v).toLocaleString('en-PK') : (v || '');
   const isLate = t => t.status !== 'done' && t.due && t.due < today();
+  // Done date, as a YYYY-MM-DD day in Pakistan time
+  const doneDay = t => t.status === 'done' && t.doneAt ? new Date(t.doneAt).toLocaleDateString('en-CA', { timeZone: 'Asia/Karachi' }) : '';
+  const fmtStamp = ms => new Date(ms).toLocaleString(undefined, { day: 'numeric', month: 'short', year: 'numeric', hour: 'numeric', minute: '2-digit', timeZone: 'Asia/Karachi' });
   const userById = id => state.users.find(u => u.id === id);
   const clientById = id => state.clients.find(c => c.id === id);
   const lead = () => state.me && state.me.role !== 'staff';
@@ -245,6 +248,10 @@
     { key: 'due', label: 'Due', options: DUE_FILTERS, sort: t => t.due || '9999',
       match: (t, v) => { const d = t.due, td = today();
         return v === 'none' ? !d : v === 'overdue' ? isLate(t) : !d ? false : v === 'today' ? d === td : v === 'week' ? d >= td && d <= addDays(td, 7) : d.slice(0, 7) === td.slice(0, 7); } },
+    { key: 'done', label: 'Done on', sort: t => doneDay(t) || '0000',
+      options: [['', 'Any'], ['today', 'Today'], ['week', 'Last 7 days'], ['month', 'This month'], ['notdone', 'Not done yet']],
+      match: (t, v) => { const d = doneDay(t), td = today();
+        return v === 'notdone' ? !d : !d ? false : v === 'today' ? d === td : v === 'week' ? d >= addDays(td, -7) && d <= td : d.slice(0, 7) === td.slice(0, 7); } },
     { key: 'status', label: 'Status', options: [['', 'Any'], ...STATUS], match: (t, v) => t.status === v, sort: t => ({ todo: 0, doing: 1, done: 2 })[t.status] },
   ];
   const colState = {}; // per table: { sort: {key, dir}, f: {key: value} }
@@ -370,14 +377,24 @@
     tr.append(el('td', 'tt-partners', t.partnerNames.join(', ') || '—'));
     const pr = el('td'); pr.append(el('span', 'pill p-' + t.priority, t.priority)); tr.append(pr);
     const due = el('td', 'tt-due' + (late ? ' late' : ''), t.due ? fmtDate(t.due) : '—'); if (late) due.append(el('small', null, 'Overdue')); tr.append(due);
-    // Status
+    const dn = el('td', 'tt-done', doneDay(t) ? fmtDate(doneDay(t)) : '—');
+    if (t.status === 'done' && t.doneByName) dn.append(el('small', null, 'by ' + t.doneByName));
+    tr.append(dn);
+    // Status: a done task is locked; only the owner or the partner who gave it can move it back, with a reason
     const st = el('td');
-    if (mine || t.canEdit) {
+    const locked = t.status === 'done' && !t.canReopen;
+    if ((mine || t.canEdit) && !locked) {
       const sel = el('select', 'st-select st-' + t.status); sel.id = 'st-' + t.id; sel.setAttribute('aria-label', 'Status of ' + t.title);
       for (const [k, label] of STATUS) opt(sel, k, label);
-      sel.value = t.status; sel.onchange = () => patchTask(t, { status: sel.value });
+      sel.value = t.status;
+      sel.onchange = () => { if (t.status === 'done') { const to = sel.value; sel.value = 'done'; openReopen(t, to); } else patchTask(t, { status: sel.value }); };
       st.append(sel);
-    } else st.append(el('span', 'st-pill st-' + t.status, STATUS_LABEL[t.status]));
+    } else {
+      const pill = el('span', 'st-pill st-' + t.status, (locked ? '🔒 ' : '') + STATUS_LABEL[t.status]);
+      if (locked) pill.title = 'Done tasks are locked. Only the partner who assigned it or the owner can change the status.';
+      st.append(pill);
+    }
+    if (t.status !== 'done' && t.lastReopen) st.append(reopenNote(t.lastReopen));
     tr.append(st);
     // Actions
     const ac = el('td', 'acts'); const key = 'task:' + t.id;
@@ -443,26 +460,52 @@
     m.append(el('span', 'pill p-' + t.priority, t.priority));
     if (lead() || !mine) { const w = el('span', 'who'); w.append(el('span', 'av', initials(t.assigneeName)), document.createTextNode(whoText(t))); m.append(w); }
     if (t.due) m.append(el('span', isLate(t) ? 'late' : '', (isLate(t) ? 'Overdue · ' : 'Due ') + fmtDate(t.due)));
+    if (doneDay(t)) m.append(el('span', 'done-on', 'Done ' + fmtDate(doneDay(t)) + (t.doneByName ? ' by ' + t.doneByName : '')));
     if (t.createdBy !== me.id && !t.recurringId) m.append(el('span', null, 'From ' + t.createdByName));
     c.append(m);
+    if (t.status !== 'done' && t.lastReopen) c.append(reopenNote(t.lastReopen));
     if (!(mine || t.canEdit)) return c;
     const a = el('div', 'actions'); const key = 'task:' + t.id;
     if (state.confirm === key) {
       const cf = el('div', 'confirm'); cf.append(el('span', null, 'Delete this task?'), btn('Delete', 'ghost danger', () => delTask(t)), btn('Keep', 'ghost', () => { state.confirm = null; renderBoards(); }));
       a.append(cf); c.append(a); return c;
     }
-    for (const [k] of STATUS) if (k !== t.status) a.append(btn(k === 'done' ? 'Mark done' : k === 'doing' ? 'Start' : 'Back to To do', 'ghost', () => patchTask(t, { status: k })));
+    if (t.status === 'done') { if (t.canReopen) a.append(btn('Change status…', 'ghost', () => openReopen(t, 'todo'))); else a.append(el('span', 'locked-note', '🔒 Done — locked')); }
+    else for (const [k] of STATUS) if (k !== t.status) a.append(btn(k === 'done' ? 'Mark done' : k === 'doing' ? 'Start' : 'Back to To do', 'ghost', () => patchTask(t, { status: k })));
     a.append(btn(t.progress ? 'Edit note' : 'Add note', 'ghost', () => openNote(t)));
     if (t.clientId && clientById(t.clientId)) a.append(btn('Client logins', 'ghost', () => { state.clientId = t.clientId; setTab(clientById(t.clientId)?.scope === 'intl' ? 'intl' : 'clients'); render(); }));
     if (t.canEdit) a.append(btn('Edit', 'ghost', () => openTask(t)));
     if (t.canDelete) a.append(btn('Delete', 'ghost danger', () => { state.confirm = key; renderBoards(); }));
     c.append(a); return c;
   }
+  function reopenNote(r) {
+    const n = el('small', 'reopen-note');
+    n.append(el('b', null, `Reopened by ${r.byName}`), document.createTextNode(` · ${fmtStamp(r.at)}: ${r.reason}`));
+    return n;
+  }
+  let reopenTask = null;
+  function openReopen(t, to) {
+    reopenTask = t; $('#reopenForm').reset(); showErr('#reopenError');
+    $('#reopenFor').textContent = `“${t.title}” was marked done${doneDay(t) ? ' on ' + fmtDate(doneDay(t)) : ''}${t.doneByName ? ' by ' + t.doneByName : ''}. The reason is shown on the task to everyone on it.`;
+    $('#roStatus').value = to === 'doing' ? 'doing' : 'todo';
+    $('#reopenDlg').showModal(); $('#roReason').focus();
+  }
+  $('#reopenForm').addEventListener('submit', async e => {
+    e.preventDefault(); const reason = $('#roReason').value.trim();
+    if (!reason) { showErr('#reopenError', 'Give a reason for the change.'); return; }
+    const b = $('#roSave'); b.disabled = true;
+    try {
+      const { task } = await api('PATCH', '/api/tasks/' + reopenTask.id, { status: $('#roStatus').value, reason });
+      state.tasks = state.tasks.map(x => x.id === task.id ? task : x); $('#reopenDlg').close(); renderBoards(); if (mgmt()) renderPeople();
+      toast('Status changed to ' + STATUS_LABEL[task.status]);
+    } catch (err) { showErr('#reopenError', err.message); }
+    finally { b.disabled = false; }
+  });
   async function patchTask(t, patch, msg) {
     try {
       const { task } = await api('PATCH', '/api/tasks/' + t.id, patch);
       state.tasks = state.tasks.map(x => x.id === task.id ? task : x); renderBoards(); if (mgmt()) renderPeople();
-      toast(msg || (patch.status === 'done' ? 'Marked done' : patch.status === 'doing' ? 'Started' : 'Moved back to To do'));
+      toast(msg || (patch.status === 'done' ? (task.canReopen ? 'Marked done' : 'Marked done. It is now locked') : patch.status === 'doing' ? 'Started' : 'Moved back to To do'));
       return true;
     } catch (err) { toast(err.message); return false; }
   }

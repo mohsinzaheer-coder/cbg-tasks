@@ -341,3 +341,16 @@ button.stat.on{border-color:var(--gold);background:var(--gold-soft);box-shadow:i
 .tasks-table thead tr:first-child th{border-bottom:0}
 .col-filter{width:100%;min-width:0;box-sizing:border-box;font-size:.82rem;padding:5px 7px;border:1px solid var(--line);border-radius:7px;background:var(--surface, #fff);color:var(--text)}
 .col-filter.on{border-color:var(--gold, #c9a227);background:var(--gold-soft)}
+
+/* done date and reopen reason */
+.tt-done small{display:block;color:var(--muted);font-size:.78rem}
+.reopen-note{display:block;margin-top:6px;font-size:.78rem;line-height:1.35;color:var(--text);background:var(--gold-soft);border-left:3px solid var(--gold, #c9a227);padding:4px 7px;border-radius:4px;max-width:260px}
+.card .reopen-note{max-width:none;margin:8px 0 0}
+.locked-note{font-size:.82rem;color:var(--muted);align-self:center}
+.done-on{color:var(--good)}
+/* ten columns: keep the table tidy and let the frame scroll sideways on narrow screens */
+.tasks-table{min-width:1180px}
+.tasks-table th,.tasks-table td{padding-left:8px;padding-right:8px}
+.tasks-table .th-sort{white-space:nowrap}
+.tasks-table td.tt-done{white-space:nowrap}
+.tasks-table td.acts{min-width:130px}
