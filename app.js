@@ -121,9 +121,10 @@
   async function refresh() {
     try {
       const calls = [api('GET', '/api/users'), api('GET', '/api/tasks'), api('GET', '/api/clients'), api('GET', '/api/categories')];
-      if (lead()) calls.push(api('GET', '/api/recurring'));
-      const [u, t, c, k, r] = await Promise.all(calls);
+      if (lead()) calls.push(api('GET', '/api/recurring'), api('GET', '/api/personal'));
+      const [u, t, c, k, r, pl] = await Promise.all(calls);
       state.users = u.users; state.tasks = t.tasks; state.clients = c.clients; state.categories = k.categories; state.rules = r ? r.rules : [];
+      state.personal = pl || { categories: [], projects: [] };
       render();
     } catch (err) { if (err.status !== 401) toast(err.message); }
   }
@@ -269,7 +270,8 @@
     if (!list.length) { host.append(el('div', 'lane-empty', !tasks.length && emptyText ? emptyText : `No ${cur === 'all' ? '' : STATUS_LABEL[cur].toLowerCase() + ' '}tasks here.`)); return; }
     const wrap = el('div', 'table-wrap'); const table = el('table', 'table tasks-table');
     const thead = el('thead'); const hr = el('tr');
-    for (const h of ['Task', 'Client', 'Category', 'Assigned to', 'Partners', 'Priority', 'Due', 'Status', '']) hr.append(el('th', null, h));
+    const hasProj = tasks.some(t => t.visibility === 'personal');
+    for (const h of ['Task', hasProj ? 'Client / Project' : 'Client', 'Category', 'Assigned to', 'Partners', 'Priority', 'Due', 'Status', '']) hr.append(el('th', null, h));
     thead.append(hr); table.append(thead);
     const tb = el('tbody'); for (const t of list) tb.append(taskRow(t)); table.append(tb);
     wrap.append(table); host.append(wrap);
@@ -290,7 +292,7 @@
     if (t.notes) td.append(el('small', 'tt-notes', t.notes));
     if (t.progress) { const p = el('small', 'tt-progress'); p.append(el('b', null, 'Progress: '), document.createTextNode(t.progress)); td.append(p); }
     tr.append(td);
-    const ctd = el('td', null, t.clientName || '—');
+    const ctd = el('td', null, t.visibility === 'personal' ? (t.projectName || '—') : (t.clientName || '—'));
     if (clientById(t.clientId)?.scope === 'intl') { ctd.append(document.createTextNode(' ')); ctd.append(el('span', 'chip intl', 'Intl')); }
     tr.append(ctd);
     tr.append(el('td', null, t.categoryName || '—'));
@@ -348,7 +350,7 @@
   function renderFeed() {
     const ty = $('#feedType').value, q = $('#feedText').value.trim().toLowerCase();
     const mineAll = state.tasks.filter(t => t.assigneeIds.includes(state.me.id));
-    const mine = mineAll.filter(t => (!ty || t.visibility === ty) && (!q || `${t.title} ${t.notes} ${t.progress} ${t.clientName}`.toLowerCase().includes(q)));
+    const mine = mineAll.filter(t => (!ty || t.visibility === ty) && (!q || `${t.title} ${t.notes} ${t.progress} ${t.clientName} ${t.projectName} ${t.categoryName}`.toLowerCase().includes(q)));
     drawLanes($('#feedLanes'), mine, mineAll.length ? null : 'Nothing here yet. Use “Add my task” to add your first to-do.');
   }
   $('#feedType').addEventListener('change', renderFeed);
@@ -359,6 +361,7 @@
     const tags = el('div', 'meta');
     if (t.visibility === 'personal') tags.append(el('span', 'chip personal', 'Personal · only you'));
     if (t.clientName) tags.append(el('span', 'chip client', t.clientName));
+    if (t.projectName) tags.append(el('span', 'chip client', 'Project: ' + t.projectName));
     if (t.categoryName) tags.append(el('span', 'chip', t.categoryName));
     if (me.role === 'partner' && !mine && t.createdBy !== me.id && t.partnerIds.includes(me.id)) tags.append(el('span', 'chip watch', 'Following as partner'));
     if (t.selfAdded && !mine && t.visibility !== 'personal') tags.append(el('span', 'chip watch', 'Self-added'));
@@ -486,7 +489,51 @@
     };
     openClient(null, scope || 'local');
   }
-  function fillCats(sel) { sel.replaceChildren(); opt(sel, '', 'No category'); for (const c of state.categories) opt(sel, c.id, c.name); }
+  function fillCats(sel, canAdd) {
+    sel.replaceChildren(); opt(sel, '', 'No category'); for (const c of state.categories) opt(sel, c.id, c.name);
+    if (canAdd && mgmt()) opt(sel, '__new', '+ Add new category…');
+    sel.dataset.prev = sel.value;
+  }
+  // personal categories and projects belong to me alone
+  function fillPersonal(sel, kind, keep) {
+    sel.replaceChildren(); opt(sel, '', kind === 'projects' ? 'No project' : 'No category');
+    for (const c of (state.personal?.[kind] || [])) opt(sel, c.id, c.name);
+    opt(sel, '__new', kind === 'projects' ? '+ Add new project…' : '+ Add new category…');
+    sel.value = keep != null ? String(keep) : ''; sel.dataset.prev = sel.value;
+  }
+  /* "+ Add new…" in the task form opens a small box under the fields instead of a pop-up */
+  let addTarget = null; // { sel, kind: 'business' | 'categories' | 'projects' }
+  const ADD_LABELS = { business: 'New task category', categories: 'New personal category', projects: 'New project name' };
+  function openAddNew(sel, kind) {
+    sel.value = sel.dataset.prev || ''; addTarget = { sel, kind };
+    $('#tAddLabel').textContent = ADD_LABELS[kind]; $('#tAddName').value = ''; $('#tAddNew').hidden = false; $('#tAddName').focus();
+  }
+  function closeAddNew() { addTarget = null; $('#tAddNew').hidden = true; }
+  async function saveAddNew() {
+    if (!addTarget) return; const name = $('#tAddName').value.trim();
+    if (!name) { showErr('#taskError', 'Type a name first.'); $('#tAddName').focus(); return; }
+    const { sel, kind } = addTarget; const b = $('#tAddOk'); b.disabled = true; showErr('#taskError');
+    try {
+      if (kind === 'business') {
+        const { category } = await api('POST', '/api/categories', { name });
+        state.categories = [...state.categories, category].sort((x, y) => x.name.localeCompare(y.name));
+        const first = sel.options[0].textContent; fillCats(sel, true); sel.options[0].textContent = first;
+        sel.value = String(category.id);
+      } else {
+        const { item } = await api('POST', '/api/personal/' + kind, { name });
+        state.personal[kind] = [...state.personal[kind], item].sort((x, y) => x.name.localeCompare(y.name));
+        fillPersonal(sel, kind, item.id);
+      }
+      sel.dataset.prev = sel.value; closeAddNew(); toast(name + ' added'); sel.focus();
+    } catch (err) { showErr('#taskError', err.message); }
+    finally { b.disabled = false; }
+  }
+  $('#tAddOk').onclick = saveAddNew;
+  $('#tAddCancel').onclick = closeAddNew;
+  $('#tAddName').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); saveAddNew(); } else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeAddNew(); } });
+  $('#tCat').addEventListener('change', e => { const s = e.target; if (s.value === '__new') openAddNew(s, 'business'); else { s.dataset.prev = s.value; if (addTarget?.sel === s) closeAddNew(); } });
+  for (const [id, kind] of [['#tPCat', 'categories'], ['#tProject', 'projects']])
+    $(id).addEventListener('change', e => { const s = e.target; if (s.value === '__new') openAddNew(s, kind); else { s.dataset.prev = s.value; if (addTarget?.sel === s) closeAddNew(); } });
   function fillPartnerChecks(box, selected) {
     box.replaceChildren();
     // Everyone who can be named as a partner on a task: the owner and all active partners, including me
@@ -560,11 +607,14 @@
     const showWho = !personal && !staff && (!own || !!state.editing);
     $('#tWhoWrap').hidden = !showWho;
     $('#tPartnersWrap').hidden = personal || staff;
+    // Personal tasks use my own categories and a project instead of the firm's categories and a client
+    $('#tBizRow').hidden = personal; $('#tPerRow').hidden = !personal;
+    if (addTarget && (addTarget.kind === 'business') === personal) closeAddNew();
     // Category and client are compulsory when assigning, and for anything staff add
     const forOther = showWho && getWho().some(id => id !== state.me.id);
     const req = !personal && (!own || staff || forOther || (state.editing && state.editing.createdBy !== state.me.id));
     $('#tCatReq').hidden = !req; $('#tClientReq').hidden = !req;
-    $('#tCat').required = req; $('#tClient').required = req;
+    $('#tCat').required = req && !personal; $('#tClient').required = req && !personal;
     $('#tCat').options[0].textContent = req ? 'Choose a category' : 'No category';
     $('#tClient').options[0].textContent = req ? 'Choose a client' : 'No client (internal)';
     const needs = own && !personal && state.me.role === 'manager';
@@ -577,7 +627,9 @@
     state.editing = t || null;
     taskMode = t ? (t.assigneeIds.length === 1 && t.assigneeIds[0] === state.me.id && t.createdBy === state.me.id ? 'own' : 'assign') : (mode || 'assign');
     $('#taskForm').reset(); showErr('#taskError');
-    fillCats($('#tCat')); const boardScope = !t && taskMode === 'assign' && state.tab === 'tasks' ? (state.board === 'intl' ? 'intl' : 'local') : null;
+    closeAddNew(); fillCats($('#tCat'), true);
+    fillPersonal($('#tPCat'), 'categories', t?.personalCategoryId); fillPersonal($('#tProject'), 'projects', t?.projectId);
+    const boardScope = !t && taskMode === 'assign' && state.tab === 'tasks' ? (state.board === 'intl' ? 'intl' : 'local') : null;
     const taskScope = t && t.clientId ? (clientById(t.clientId)?.scope === 'intl' ? 'intl' : 'local') : boardScope;
     fillClients($('#tClient'), t?.clientId, boardScope);
     $('#tWhoSearch').value = ''; renderWho(taskScope, t ? t.assigneeIds : []);
@@ -594,7 +646,7 @@
     }
     $('#taskDlgTitle').textContent = t ? 'Edit task' : taskMode === 'own' ? 'Add my task' : 'Assign task';
     $('#taskSave').textContent = t ? 'Save changes' : taskMode === 'own' ? 'Add task' : 'Assign task';
-    syncTaskType();
+    syncTaskType(); $('#tCat').dataset.prev = $('#tCat').value;
     if (taskMode === 'assign' && !whoBox().querySelector('input')) showErr('#taskError', 'Add people on the People tab first.');
     $('#taskDlg').showModal(); $('#tTitle').focus();
   }
@@ -605,6 +657,10 @@
     const own = taskMode === 'own'; const personal = own && $('#tTypePer').checked;
     const body = { title: $('#tTitle').value.trim(), priority: $('#tPri').value, due: $('#tDue').value, notes: $('#tNotes').value.trim(),
       categoryId: $('#tCat').value ? Number($('#tCat').value) : null, clientId: $('#tClient').value ? Number($('#tClient').value) : null };
+    if (personal) {
+      delete body.categoryId; delete body.clientId;
+      body.personalCategoryId = $('#tPCat').value ? Number($('#tPCat').value) : null; body.projectId = $('#tProject').value ? Number($('#tProject').value) : null;
+    }
     const pickWho = !$('#tWhoWrap').hidden;
     if (own) { body.visibility = personal ? 'personal' : 'business'; body.assigneeIds = personal ? [state.me.id] : pickWho ? getWho() : [state.me.id]; }
     else body.assigneeIds = getWho();

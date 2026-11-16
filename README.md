@@ -94,6 +94,8 @@ Existing clients are matched by name: their blank details are filled in, and log
 
 The owner and partners have a **My feed** tab for their own to-dos. Each one is **Business** or **Personal**.
 Personal tasks are seen only by the person who added them, not by the owner or anyone else.
+Business tasks use the firm's task categories and a client. Personal tasks use your own **personal categories** and a **Project** instead of a client. Both lists are private to you, and each has **+ Add new…** in the form.
+The owner and partners can also add a new firm task category straight from the task form with **+ Add new category…**.
 
 ## Client portal passwords (CRED_KEY)
 

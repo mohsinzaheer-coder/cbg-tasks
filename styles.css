@@ -324,3 +324,8 @@ button.stat.on{border-color:var(--gold);background:var(--gold-soft);box-shadow:i
 .st-pill.imp-error{background:var(--late-soft);color:var(--late);border-color:var(--late)}
 .st-pill.imp-skip{background:var(--gold-soft);border-color:var(--gold)}
 #rWhoWrap{gap:6px}
+
+/* inline "+ Add new…" box in the task form */
+.addnew{display:flex;flex-direction:column;gap:6px;padding:10px 12px;border:1px dashed var(--gold, #c9a227);border-radius:10px}
+.addnew-row{display:flex;gap:8px;flex-wrap:wrap}
+.addnew-row input{flex:1 1 180px;min-width:0}

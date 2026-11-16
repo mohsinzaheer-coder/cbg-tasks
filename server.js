@@ -140,6 +140,11 @@ CREATE TABLE IF NOT EXISTS recurring (
   add('recurring_id', 'INTEGER REFERENCES recurring(id) ON DELETE SET NULL');
   add('period', "TEXT NOT NULL DEFAULT ''");
   add('visibility', "TEXT NOT NULL DEFAULT 'business'");
+  // Version 2.15: personal tasks have their own categories and projects, private to the person who made them
+  db.exec(`CREATE TABLE IF NOT EXISTS personal_categories (id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id), name TEXT NOT NULL COLLATE NOCASE, UNIQUE(user_id, name));
+           CREATE TABLE IF NOT EXISTS personal_projects (id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id), name TEXT NOT NULL COLLATE NOCASE, UNIQUE(user_id, name));`);
+  add('pcat_id', 'INTEGER REFERENCES personal_categories(id) ON DELETE SET NULL');
+  add('project_id', 'INTEGER REFERENCES personal_projects(id) ON DELETE SET NULL');
   db.exec('CREATE INDEX IF NOT EXISTS tasks_client ON tasks(client_id)');
   const rcols = db.prepare('PRAGMA table_info(recurring)').all().map(c => c.name);
   if (!rcols.includes('partner_ids')) db.exec("ALTER TABLE recurring ADD COLUMN partner_ids TEXT NOT NULL DEFAULT ''");
@@ -438,7 +443,8 @@ function taskOut(t, me, partners) {
   return {
     id: t.id, title: t.title, notes: t.notes, priority: t.priority, due: t.due, status: t.status, progress: t.progress,
     assigneeId: t.assignee_id, assigneeIds: aIds(t), assigneeNames: aList(t).map(a => a.name), assigneeName: aList(t).map(a => a.name).join(', '), createdBy: t.created_by, createdByName: t.creator_name,
-    categoryId: t.category_id, categoryName: t.category_name || '', clientId: t.client_id, clientName: t.client_name || '',
+    categoryId: t.category_id, categoryName: (t.visibility === 'personal' ? t.pcat_name : t.category_name) || '', clientId: t.client_id, clientName: t.client_name || '',
+    personalCategoryId: t.pcat_id ?? null, projectId: t.project_id ?? null, projectName: t.project_name || '',
     recurringId: t.recurring_id, period: t.period, visibility: t.visibility || 'business',
     partnerIds: ps.map(p => p.id), partnerNames: ps.map(p => p.name),
     createdAt: t.created_at, updatedAt: t.updated_at, doneAt: t.done_at, canEdit: canEditTask(me, t),
@@ -464,9 +470,10 @@ function setTaskPartners(taskId, ids) {
   db.prepare('DELETE FROM task_partners WHERE task_id = ?').run(taskId);
   const ins = db.prepare('INSERT INTO task_partners (task_id, user_id) VALUES (?,?)'); for (const id of ids) ins.run(taskId, id);
 }
-const TASK_SELECT = `SELECT t.*, a.name assignee_name, c.name creator_name, k.name category_name, cl.name client_name FROM tasks t
+const TASK_SELECT = `SELECT t.*, a.name assignee_name, c.name creator_name, k.name category_name, cl.name client_name, pc.name pcat_name, pp.name project_name FROM tasks t
   JOIN users a ON a.id = t.assignee_id JOIN users c ON c.id = t.created_by
-  LEFT JOIN categories k ON k.id = t.category_id LEFT JOIN clients cl ON cl.id = t.client_id`;
+  LEFT JOIN categories k ON k.id = t.category_id LEFT JOIN clients cl ON cl.id = t.client_id
+  LEFT JOIN personal_categories pc ON pc.id = t.pcat_id LEFT JOIN personal_projects pp ON pp.id = t.project_id`;
 
 /* ------------------------------------------------------------- helpers */
 class HttpError extends Error { constructor(status, msg) { super(msg); this.status = status; } }
@@ -653,12 +660,38 @@ route('DELETE', '/api/users/:id', true, async (req, res, body, me, params) => {
   send(res, 200, { ok: true, moved: { openTasks, rules, clients: managed + assigned }, to: to ? to.name : null });
 });
 
+/* ---- personal categories and projects (private to each owner/partner) ---- */
+const PERSONAL_KINDS = { categories: ['personal_categories', 'Category', 'category'], projects: ['personal_projects', 'Project', 'project'] };
+function personalLists(me) {
+  return {
+    categories: db.prepare('SELECT id, name FROM personal_categories WHERE user_id = ? ORDER BY name').all(me.id),
+    projects: db.prepare('SELECT id, name FROM personal_projects WHERE user_id = ? ORDER BY name').all(me.id),
+  };
+}
+route('GET', '/api/personal', true, async (req, res, body, me) => {
+  if (!canHavePersonal(me)) throw new HttpError(403, 'Personal tasks are not available for staff.');
+  send(res, 200, personalLists(me));
+});
+for (const kind of Object.keys(PERSONAL_KINDS)) route('POST', '/api/personal/' + kind, true, async (req, res, body, me) => {
+  const k = PERSONAL_KINDS[kind];
+  if (!canHavePersonal(me)) throw new HttpError(403, 'Personal tasks are not available for staff.');
+  const name = str(body.name, 80, k[1]); if (!name) throw bad(`Enter a ${k[2]} name.`);
+  if (db.prepare(`SELECT 1 FROM ${k[0]} WHERE user_id = ? AND name = ?`).get(me.id, name)) throw bad(`You already have that ${k[2]}.`);
+  const r = db.prepare(`INSERT INTO ${k[0]} (user_id, name) VALUES (?,?)`).run(me.id, name);
+  send(res, 201, { item: { id: Number(r.lastInsertRowid), name } });
+});
+function checkPersonal(me, table, v, what) {
+  const id = intOrNull(v); if (id === null) return null;
+  if (!db.prepare(`SELECT 1 FROM ${table} WHERE id = ? AND user_id = ?`).get(id, me.id)) throw bad(`Choose one of your ${what}.`);
+  return id;
+}
+
 /* ---- categories ---- */
 route('GET', '/api/categories', true, async (req, res) => send(res, 200, { categories: db.prepare('SELECT id, name FROM categories ORDER BY name').all() }));
 route('POST', '/api/categories', true, async (req, res, body, me) => {
-  if (me.role !== 'owner') throw new HttpError(403, 'Only the owner can change categories.');
+  if (!['owner', 'partner'].includes(me.role)) throw new HttpError(403, 'Only the owner and partners can add categories.');
   const name = str(body.name, 50, 'Category'); if (!name) throw bad('Enter a category name.');
-  if (db.prepare('SELECT 1 FROM categories WHERE name = ?').get(name)) throw bad('That category already exists.');
+  if (db.prepare('SELECT 1 FROM categories WHERE name = ? COLLATE NOCASE').get(name)) throw bad('That category already exists.');
   const r = db.prepare('INSERT INTO categories (name) VALUES (?)').run(name);
   send(res, 201, { category: { id: Number(r.lastInsertRowid), name } });
 });
@@ -955,14 +988,17 @@ route('POST', '/api/tasks', true, async (req, res, body, me) => {
     people = readAssignees(body).map(id => checkAssignee(me, id).id);
     partners = checkPartners(body.partnerIds, null);
   }
-  const cat = checkCategory(body.categoryId); const cli = checkClient(me, body.clientId);
+  const per = visibility === 'personal';
+  const cat = per ? null : checkCategory(body.categoryId); const cli = per ? null : checkClient(me, body.clientId);
+  const pcat = per ? checkPersonal(me, 'personal_categories', body.personalCategoryId, 'personal categories') : null;
+  const proj = per ? checkPersonal(me, 'personal_projects', body.projectId, 'projects') : null;
   if (needsClientCat(me, people, me.id, visibility)) requireClientCat(cat, cli);
   checkIntlPeople(cli, [...people, ...partners]);
   checkWorkArea(cli, people);
   const now = Date.now();
   const id = tx(() => {
-    const r = db.prepare(`INSERT INTO tasks (title,notes,priority,due,assignee_id,created_by,created_at,updated_at,updated_by,category_id,client_id,visibility)
-                          VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`).run(title, notes, priority, due, people[0], me.id, now, now, me.id, cat, cli, visibility);
+    const r = db.prepare(`INSERT INTO tasks (title,notes,priority,due,assignee_id,created_by,created_at,updated_at,updated_by,category_id,client_id,visibility,pcat_id,project_id)
+                          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(title, notes, priority, due, people[0], me.id, now, now, me.id, cat, cli, visibility, pcat, proj);
     const tid = Number(r.lastInsertRowid);
     setTaskAssignees(tid, people); setTaskPartners(tid, partners);
     return tid;
@@ -1010,6 +1046,12 @@ route('PATCH', '/api/tasks/:id', true, async (req, res, body, me, params) => {
   }
   if ('partnerIds' in body && !full) throw new HttpError(403, 'You can update status and progress only.');
   const vis = sets.visibility ?? t.visibility;
+  if (vis === 'personal') {
+    // personal tasks use the creator's own categories and projects, never business ones or a client
+    sets.category_id = null; sets.client_id = null;
+    if ('personalCategoryId' in body) sets.pcat_id = checkPersonal(me, 'personal_categories', body.personalCategoryId, 'personal categories');
+    if ('projectId' in body) sets.project_id = checkPersonal(me, 'personal_projects', body.projectId, 'projects');
+  } else if (t.pcat_id !== null || t.project_id !== null) { sets.pcat_id = null; sets.project_id = null; }
   if (('categoryId' in body || 'clientId' in body || changingPeople) && needsClientCat(me, people, t.created_by, vis))
     requireClientCat('category_id' in sets ? sets.category_id : t.category_id, 'client_id' in sets ? sets.client_id : t.client_id);
   let partners = 'partnerIds' in body ? checkPartners(body.partnerIds, null) : taskPartners(t.id).map(p => p.id);

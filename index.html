@@ -175,9 +175,17 @@
       <label class="seg-opt"><input type="radio" name="tType" id="tTypePer" value="personal"><span><b>Personal</b><small>Only you can see it</small></span></label>
     </div>
     <label for="tTitle">Task<input id="tTitle" required maxlength="160"></label>
-    <div class="row2">
+    <div class="row2" id="tBizRow">
       <label for="tCat"><span>Task category <em class="req" id="tCatReq">(required)</em></span><select id="tCat"></select></label>
       <label for="tClient"><span>Client <em class="req" id="tClientReq">(required)</em></span><select id="tClient"></select></label>
+    </div>
+    <div class="row2" id="tPerRow" hidden>
+      <label for="tPCat"><span>Personal category</span><select id="tPCat"></select></label>
+      <label for="tProject"><span>Project</span><select id="tProject"></select></label>
+    </div>
+    <div class="addnew" id="tAddNew" hidden>
+      <label for="tAddName" id="tAddLabel">New category</label>
+      <div class="addnew-row"><input id="tAddName" maxlength="80"><button type="button" class="primary" id="tAddOk">Add</button><button type="button" class="ghost" id="tAddCancel">Cancel</button></div>
     </div>
     <div class="field" id="tWhoWrap"><span class="flabel">Assign to <em class="req">(tick one or more)</em></span>
       <input type="search" id="tWhoSearch" placeholder="Find a person" aria-label="Find a person to assign">
