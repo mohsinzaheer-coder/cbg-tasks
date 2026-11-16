@@ -6,7 +6,7 @@ A web portal where every employee signs in with their own **Login ID and passwor
 |---|---|---|
 | **Owner** | Every partner, every staff member, every business task | Add partners and staff, move staff between partners, assign tasks to anyone, reset passwords, deactivate accounts |
 | **Partner** | Their own staff's business tasks, tasks they assigned or are listed on as a partner; all clients (edit the ones they are in charge of) | Add and manage their own staff, assign tasks to partners and staff, follow tasks they are involved in, keep a private feed |
-| **Staff** | Only tasks assigned to him, and the clients assigned to him | Mark tasks Started or Done, add a progress note, view the portal logins of his clients. Cannot create, edit, reassign or delete tasks or clients |
+| **Staff** | Only tasks assigned to him, and the clients assigned to him | Mark tasks Started or Done, add a progress note, view the portal logins of his clients. Can add a client (it goes to his partner) and edit that client's details and logins. Cannot archive clients or delete logins, and cannot reassign or delete tasks |
 
 Every rule is checked on the server, so a staff member cannot see another person's tasks even by tampering with the browser.
 

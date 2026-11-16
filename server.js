@@ -186,6 +186,8 @@ CREATE TABLE IF NOT EXISTS recurring (
   // Version 2.12: company capital, and recurring tasks for several people
   if (!cols.includes('authorized_capital')) db.exec("ALTER TABLE clients ADD COLUMN authorized_capital TEXT NOT NULL DEFAULT ''");
   if (!cols.includes('paid_up_capital')) db.exec("ALTER TABLE clients ADD COLUMN paid_up_capital TEXT NOT NULL DEFAULT ''");
+  // Version 2.17: remember who added a client, so staff can keep editing the clients they add
+  if (!cols.includes('created_by')) db.exec('ALTER TABLE clients ADD COLUMN created_by INTEGER');
   const rc = db.prepare('PRAGMA table_info(recurring)').all().map(c => c.name);
   if (!rc.includes('assignee_ids')) { db.exec("ALTER TABLE recurring ADD COLUMN assignee_ids TEXT NOT NULL DEFAULT ''"); db.exec('UPDATE recurring SET assignee_ids = CAST(assignee_id AS TEXT)'); }
 }
@@ -385,7 +387,7 @@ function checkIntlPeople(clientId, people) {
   }
 }
 function canSeeClient(me, c) { if (!c) return false; const ids = visibleClientIds(me); return ids === null || ids.includes(c.id); }
-function canEditClient(me, c) { return me.role === 'owner' || (me.role === 'partner' && c.manager_id === me.id); }
+function canEditClient(me, c) { return me.role === 'owner' || (me.role === 'partner' && c.manager_id === me.id) || (me.role === 'staff' && c.created_by === me.id); }
 
 /* Task visibility
  *   personal — only the person who created it, nobody else (the owner included)
@@ -711,7 +713,7 @@ function clientOut(c, me) {
   return {
     id: c.id, name: c.name, code: c.code, entityType: c.entity_type, ntn: c.ntn, strn: c.strn, cnic: c.cnic,
     contactPerson: c.contact_person, phone: c.phone, email: c.email, notes: c.notes, managerId: c.manager_id,
-    managerName: c.manager_name || '', active: !!c.active, staffIds, logins, canEdit: canEditClient(me, c),
+    managerName: c.manager_name || '', active: !!c.active, staffIds, logins, canEdit: canEditClient(me, c), canDeleteLogins: canEditClient(me, c) && me.role !== 'staff',
     scope: c.scope === 'intl' ? 'intl' : 'local', country: c.country || '', taxId: c.tax_id || '',
     authorizedCapital: c.authorized_capital || '', paidUpCapital: c.paid_up_capital || '',
     accessIds: c.scope === 'intl' ? db.prepare('SELECT user_id FROM client_access WHERE client_id = ?').all(c.id).map(r => r.user_id) : [],
@@ -769,11 +771,24 @@ function setClientStaff(me, clientId, managerId, staffIds) {
   const ins = db.prepare('INSERT INTO client_staff VALUES (?,?)'); for (const id of ids) ins.run(clientId, id);
 }
 route('POST', '/api/clients', true, async (req, res, body, me) => {
-  if (me.role !== 'owner' && me.role !== 'partner') throw new HttpError(403, 'Only the owner and partners can add clients.');
+  const staff = me.role === 'staff';
   if (me.role === 'partner') body.managerId = me.id;
+  if (staff) {
+    // Staff may add a client: it goes to their own partner, and they are the staff member on it
+    delete body.managerId; delete body.active;
+    const area = me.work_area || 'local', wantIntl = body.scope === 'intl';
+    if (wantIntl && area === 'local') throw new HttpError(403, 'You work on local clients only.');
+    if (!wantIntl && area === 'intl') throw new HttpError(403, 'You work on international clients only.');
+    body.staffIds = [me.id]; body.accessIds = [me.id];
+  }
   if (!('name' in body)) throw bad('Enter the client name.');
   const f = clientFields(body, me, null);
   f.scope = body.scope === 'intl' ? 'intl' : 'local';
+  f.created_by = me.id;
+  if (staff) {
+    const boss = me.manager_id && db.prepare("SELECT id FROM users WHERE id = ? AND role = 'partner' AND active = 1 AND deleted = 0").get(me.manager_id);
+    f.manager_id = boss ? boss.id : null;
+  }
   const id = tx(() => {
     const now = Date.now(); const cols = Object.keys(f);
     const r = db.prepare(`INSERT INTO clients (${cols.join(',')}, created_at, updated_at) VALUES (${cols.map(() => '?').join(',')}, ?, ?)`).run(...cols.map(k => f[k]), now, now);
@@ -788,6 +803,7 @@ route('PATCH', '/api/clients/:id', true, async (req, res, body, me, params) => {
   const c = getClient(params.id);
   if (!canSeeClient(me, c)) throw new HttpError(404, 'Client not found.');
   if (!canEditClient(me, c)) throw new HttpError(403, 'You can view this client but not change it.');
+  if (me.role === 'staff') { delete body.staffIds; delete body.accessIds; delete body.managerId; delete body.active; } // staff edit details only
   const f = clientFields(body, me, c);
   tx(() => {
     const cols = Object.keys(f);
@@ -829,6 +845,8 @@ route('PUT', '/api/clients/:id/logins/:auth', true, async (req, res, body, me, p
   const auth = portalName(c, params.auth);
   const loginId = str(body.loginId, 80, 'Login ID');
   const cur = db.prepare('SELECT * FROM client_logins WHERE client_id = ? AND authority = ?').get(c.id, auth);
+  if (me.role === 'staff' && cur && ((body.password === '' && cur.secret_enc) || (body.pin === '' && cur.pin_enc)))
+    throw new HttpError(403, 'Staff can replace a saved password or PIN but not clear it. Ask your partner.');
   // null/undefined keeps the saved value; '' clears it
   const secret = body.password == null ? (cur?.secret_enc || '') : encrypt(str(body.password, 200, 'Password'));
   const pin = body.pin == null ? (cur?.pin_enc || '') : encrypt(str(body.pin, 50, 'PIN'));
@@ -841,6 +859,7 @@ route('DELETE', '/api/clients/:id/logins/:auth', true, async (req, res, body, me
   const c = getClient(params.id);
   if (!canSeeClient(me, c)) throw new HttpError(404, 'Client not found.');
   if (!canEditClient(me, c)) throw new HttpError(403, 'You can view this client\'s logins but not change them.');
+  if (me.role === 'staff') throw new HttpError(403, 'Staff can add and update logins but not delete them. Ask your partner.');
   db.prepare('DELETE FROM client_logins WHERE client_id = ? AND authority = ?').run(c.id, portalName(c, params.auth));
   send(res, 200, { client: clientOut(getClient(c.id), me) });
 });

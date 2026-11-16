@@ -98,7 +98,7 @@
     document.querySelectorAll('#tabs [data-role="assign"]').forEach(b => b.hidden = !lead());
     document.querySelectorAll('#tabs [data-role="mgmt"]').forEach(b => b.hidden = !mgmt());
     $('#newTaskBtn').hidden = false; $('#newTaskBtn').textContent = lead() ? '+ Assign task' : '+ Add my task'; $('#fPersonWrap').hidden = !lead(); $('#fPartnerWrap').hidden = !seesAll();
-    $('#newClientBtn').hidden = !mgmt(); $('#cMgrWrap').hidden = !seesAll();
+    $('#newClientBtn').hidden = !canAddClient(state.clientScope); $('#cMgrWrap').hidden = !seesAll();
     $('#credsOff').hidden = !!state.config.credsEnabled;
     $('#tasksTitle').textContent = { staff: 'My tasks', manager: 'My team\'s tasks', partner: 'Tasks', owner: 'All tasks' }[me.role];
     state.tasksSubLocal = {
@@ -544,7 +544,9 @@
         sel.append(g);
       }
     } else for (const c of local) opt(sel, c.id, label(c));
-    if (mgmt()) { opt(sel, '__new', '+ Add new client…'); opt(sel, '__newintl', '+ Add new international client…'); } // create one without leaving the form
+    // create one without leaving the form
+    if (canAddClient('local')) opt(sel, '__new', '+ Add new client…');
+    if (canAddClient('intl')) opt(sel, '__newintl', '+ Add new international client…');
     sel.dataset.prev = sel.value;
   }
   let afterClientSave = null;
@@ -557,6 +559,8 @@
     };
     openClient(null, scope || 'local');
   }
+  // Owner and partners add any client; staff add clients for the kind of work they do
+  function canAddClient(scope) { return mgmt() || (state.me.role === 'staff' && myArea() !== (scope === 'intl' ? 'local' : 'intl')); }
   function fillCats(sel, canAdd) {
     sel.replaceChildren(); opt(sel, '', 'No category'); for (const c of state.categories) opt(sel, c.id, c.name);
     if (canAdd && mgmt()) opt(sel, '__new', '+ Add new category…');
@@ -764,8 +768,8 @@
     $('#clientsTitle').textContent = intl ? 'International clients' : 'Clients';
     $('#clientsSub').textContent = intl
       ? (state.me.role === 'owner' ? 'Each international client is visible only to you and the partners and staff listed on it.' : 'International clients you have been given access to. Only the people listed on each client can see it.')
-      : ({ owner: 'All clients, their registrations and portal logins.', partner: 'All clients and their portal logins. You can edit the clients you are in charge of.', staff: 'All clients and their portal logins (view only). Each time you show a password it is recorded.' }[state.me.role] || '');
-    $('#newClientBtn').textContent = intl ? '+ Add international client' : '+ Add client';
+      : ({ owner: 'All clients, their registrations and portal logins.', partner: 'All clients and their portal logins. You can edit the clients you are in charge of.', staff: 'All clients and their portal logins. You can add a client and edit the ones you added. Each time you show a password it is recorded.' }[state.me.role] || '');
+    $('#newClientBtn').textContent = intl ? '+ Add international client' : '+ Add client'; $('#newClientBtn').hidden = !canAddClient(state.clientScope);
     $('#importClientsBtn').hidden = intl || state.me.role !== 'owner';
     $('#cSearch').placeholder = intl ? 'Name, code, country or tax ID' : 'Name, code, NTN or STRN';
     const items = filteredClients();
@@ -900,7 +904,8 @@
     $('#kStaffLbl').textContent = intl ? 'People who can see this client' : 'Staff working on this client';
     const type = $('#kType'); type.replaceChildren(); for (const t of state.config.entityTypes || []) opt(type, t, t);
     const owner = state.me.role === 'owner';
-    $('#kMgrWrap').hidden = !owner; $('#kActiveWrap').hidden = !owner || !c;
+    $('#kStaff').closest('.field').hidden = state.me.role === 'staff'; // staff are put on the clients they add automatically
+    $('#kMgrWrap').hidden = !owner; $('#kMgrWrap').parentElement.hidden = !owner && state.me.role === 'staff'; $('#kActiveWrap').hidden = !owner || !c;
     const mgr = $('#kMgr'); mgr.replaceChildren(); opt(mgr, '', 'No partner yet');
     for (const m of state.users.filter(u => u.role === 'partner' && (u.active || u.id === c?.managerId))) opt(mgr, m.id, m.name);
     if (c) {
@@ -943,7 +948,7 @@
     // International clients name their own portals; the name is chosen when the login is first added
     $('#pgNameWrap').hidden = c.scope !== 'intl' || !!auth; $('#pgName').required = c.scope === 'intl' && !auth;
     $('#portalTitle').textContent = auth ? auth + ' login' : 'Add portal login'; $('#portalFor').textContent = c.name;
-    $('#pgId').value = l?.loginId || ''; $('#portalHint').hidden = !l; $('#pgClear').closest('label').hidden = !l; $('#pgDelete').hidden = !l;
+    $('#pgId').value = l?.loginId || ''; $('#portalHint').hidden = !l; $('#pgClear').closest('label').hidden = !l || !c.canDeleteLogins; $('#pgDelete').hidden = !l || !c.canDeleteLogins;
     $('#pgPass').placeholder = l?.hasPassword ? 'Saved — type to replace' : ''; $('#pgPin').placeholder = l?.hasPin ? 'Saved — type to replace' : '';
     $('#loginDlg').showModal(); (auth ? $('#pgId') : $('#pgName')).focus();
   }
