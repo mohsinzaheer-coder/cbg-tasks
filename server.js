@@ -149,6 +149,15 @@ CREATE TABLE IF NOT EXISTS recurring (
   db.exec(`CREATE TABLE IF NOT EXISTS task_status_log (id INTEGER PRIMARY KEY, task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
              user_id INTEGER NOT NULL REFERENCES users(id), at INTEGER NOT NULL, from_status TEXT NOT NULL, to_status TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '');
            CREATE INDEX IF NOT EXISTS task_status_log_task ON task_status_log(task_id);`);
+  // Version 2.19: client portal. Client logins are kept apart from staff logins, with their own sessions.
+  db.exec(`CREATE TABLE IF NOT EXISTS portal_accounts (id INTEGER PRIMARY KEY, username TEXT NOT NULL UNIQUE COLLATE NOCASE, password_hash TEXT NOT NULL,
+             name TEXT NOT NULL, email TEXT NOT NULL DEFAULT '', phone TEXT NOT NULL DEFAULT '', active INTEGER NOT NULL DEFAULT 1, must_change INTEGER NOT NULL DEFAULT 1,
+             created_by INTEGER REFERENCES users(id), created_at INTEGER NOT NULL, last_login INTEGER);
+           CREATE TABLE IF NOT EXISTS portal_access (account_id INTEGER NOT NULL REFERENCES portal_accounts(id) ON DELETE CASCADE,
+             client_id INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE, PRIMARY KEY (account_id, client_id));
+           CREATE TABLE IF NOT EXISTS portal_sessions (token_hash TEXT PRIMARY KEY, account_id INTEGER NOT NULL REFERENCES portal_accounts(id) ON DELETE CASCADE, expires_at INTEGER NOT NULL);`);
+  add('client_note', "TEXT NOT NULL DEFAULT ''");
+  add('client_note_at', 'INTEGER');
   db.exec('CREATE INDEX IF NOT EXISTS tasks_client ON tasks(client_id)');
   const rcols = db.prepare('PRAGMA table_info(recurring)').all().map(c => c.name);
   if (!rcols.includes('partner_ids')) db.exec("ALTER TABLE recurring ADD COLUMN partner_ids TEXT NOT NULL DEFAULT ''");
@@ -319,10 +328,19 @@ function sessionUser(req) {
   return row;
 }
 const isHttps = req => process.env.COOKIE_SECURE === '1' || req.headers['x-forwarded-proto'] === 'https';
-function setCookie(res, req, token, maxAge) {
-  res.setHeader('Set-Cookie', `${COOKIE}=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAge}` + (isHttps(req) ? '; Secure' : ''));
+const PORTAL_COOKIE = 'cbg_client';
+const cookieStr = (req, name, token, maxAge) => `${name}=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAge}` + (isHttps(req) ? '; Secure' : '');
+// Signing in as one kind of account always signs out the other kind in that browser
+function setCookie(res, req, token, maxAge) { res.setHeader('Set-Cookie', [cookieStr(req, COOKIE, token, maxAge), cookieStr(req, PORTAL_COOKIE, '', 0)]); }
+function setPortalCookie(res, req, token, maxAge) { res.setHeader('Set-Cookie', [cookieStr(req, PORTAL_COOKIE, token, maxAge), cookieStr(req, COOKIE, '', 0)]); }
+function portalUser(req) {
+  const token = parseCookies(req)[PORTAL_COOKIE];
+  if (!token) return null;
+  const row = db.prepare('SELECT a.*, s.expires_at FROM portal_sessions s JOIN portal_accounts a ON a.id = s.account_id WHERE s.token_hash = ?').get(sha(token));
+  if (!row || row.expires_at < Date.now() || !row.active) return null;
+  return row;
 }
-setInterval(() => db.prepare('DELETE FROM sessions WHERE expires_at < ?').run(Date.now()), 3600e3).unref();
+setInterval(() => { db.prepare('DELETE FROM sessions WHERE expires_at < ?').run(Date.now()); db.prepare('DELETE FROM portal_sessions WHERE expires_at < ?').run(Date.now()); }, 3600e3).unref();
 
 /* ---------------------------------------------------- login rate limits */
 const attempts = new Map();
@@ -470,7 +488,7 @@ function taskOut(t, me, partners) {
     recurringId: t.recurring_id, period: t.period, visibility: t.visibility || 'business',
     partnerIds: ps.map(p => p.id), partnerNames: ps.map(p => p.name),
     createdAt: t.created_at, updatedAt: t.updated_at, doneAt: t.done_at, canEdit: canEditTask(me, t),
-    canReopen: canReopen(me, t), lastReopen: reopenedBy(t), doneByName: t.status === 'done' ? (db.prepare("SELECT u.name FROM task_status_log l JOIN users u ON u.id = l.user_id WHERE l.task_id = ? AND l.to_status = 'done' ORDER BY l.id DESC LIMIT 1").get(t.id)?.name || '') : '',
+    canReopen: canReopen(me, t), lastReopen: reopenedBy(t), clientNote: t.client_note || '', clientNoteAt: t.client_note_at || null, doneByName: t.status === 'done' ? (db.prepare("SELECT u.name FROM task_status_log l JOIN users u ON u.id = l.user_id WHERE l.task_id = ? AND l.to_status = 'done' ORDER BY l.id DESC LIMIT 1").get(t.id)?.name || '') : '',
     canDelete: canDeleteTask(me, t), selfAdded: t.created_by === t.assignee_id && aList(t).length === 1,
   };
 }
@@ -541,15 +559,25 @@ route('POST', '/api/login', false, async (req, res, body) => {
   const key = ip + '|' + username.toLowerCase();
   if (limited(key)) throw new HttpError(429, 'Too many failed attempts. Wait 15 minutes and try again.');
   const u = db.prepare('SELECT * FROM users WHERE username = ?').get(username);
-  const ok = verifyPassword(password, u ? u.password_hash : DUMMY_HASH) && u && u.active;
+  const pa = u ? null : db.prepare('SELECT * FROM portal_accounts WHERE username = ?').get(username); // client portal login
+  const acct = u || pa;
+  const ok = verifyPassword(password, acct ? acct.password_hash : DUMMY_HASH) && acct && acct.active;
   if (!ok) { fail(key); throw new HttpError(401, 'Login ID or password is incorrect.'); }
   attempts.delete(key);
+  if (pa) {
+    const token = crypto.randomBytes(32).toString('base64url');
+    db.prepare('INSERT INTO portal_sessions VALUES (?,?,?)').run(sha(token), pa.id, Date.now() + SESSION_DAYS * 864e5);
+    db.prepare('UPDATE portal_accounts SET last_login = ? WHERE id = ?').run(Date.now(), pa.id);
+    setPortalCookie(res, req, token, SESSION_DAYS * 86400);
+    return send(res, 200, { portal: true });
+  }
   setCookie(res, req, createSession(u.id), SESSION_DAYS * 86400);
   send(res, 200, { user: publicUser(u) });
 });
 route('POST', '/api/logout', false, async (req, res) => {
-  const token = parseCookies(req)[COOKIE];
-  if (token) db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(sha(token));
+  const ck = parseCookies(req);
+  if (ck[COOKIE]) db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(sha(ck[COOKIE]));
+  if (ck[PORTAL_COOKIE]) db.prepare('DELETE FROM portal_sessions WHERE token_hash = ?').run(sha(ck[PORTAL_COOKIE]));
   setCookie(res, req, '', 0); send(res, 200, { ok: true });
 });
 route('GET', '/api/me', true, async (req, res, body, me) => send(res, 200, { user: publicUser(me), config: { credsEnabled: !!CRED_KEY, authorities: AUTHORITIES, entityTypes: ENTITY_TYPES, today: localToday() } }));
@@ -584,7 +612,7 @@ route('POST', '/api/users', true, async (req, res, body, me) => {
     managerId = me.role === 'partner' ? me.id : Number(body.managerId);
     if (!db.prepare("SELECT 1 FROM users WHERE id = ? AND role = 'partner' AND active = 1 AND deleted = 0").get(managerId)) throw bad('Choose the partner this staff member reports to.');
   }
-  if (db.prepare('SELECT 1 FROM users WHERE username = ?').get(username)) throw bad('That login ID is already taken.');
+  if (loginTaken(username)) throw bad('That login ID is already taken.');
   const area = role === 'staff' ? (WORK_AREAS.includes(body.workArea) ? body.workArea : 'local') : 'both';
   const r = db.prepare('INSERT INTO users (username,password_hash,name,title,role,manager_id,must_change,created_at,work_area) VALUES (?,?,?,?,?,?,1,?,?)')
     .run(username, hashPassword(body.password), name, title, role, managerId, Date.now(), area);
@@ -610,7 +638,7 @@ route('PATCH', '/api/users/:id', true, async (req, res, body, me, params) => {
     const u = str(body.username, 40, 'Login ID');
     if (!/^[A-Za-z0-9._-]{3,40}$/.test(u)) throw bad('Login ID must be 3–40 letters, numbers, dots, dashes or underscores.');
     const ex = db.prepare('SELECT id FROM users WHERE username = ?').get(u);
-    if (ex && ex.id !== target.id) throw bad('That login ID is already taken.');
+    if ((ex && ex.id !== target.id) || db.prepare('SELECT 1 FROM portal_accounts WHERE username = ?').get(u)) throw bad('That login ID is already taken.');
     sets.username = u;
   }
   if ('password' in body) { const p = passwordProblem(body.password); if (p) throw bad(p); sets.password_hash = hashPassword(body.password); sets.must_change = 1; }
@@ -1065,6 +1093,12 @@ route('PATCH', '/api/tasks/:id', true, async (req, res, body, me, params) => {
     if (!full && !mine) throw new HttpError(403, 'You can only update your own tasks.');
     sets.progress = str(body.progress, 1000, 'Progress note');
   }
+  if ('clientNote' in body) { // shown to the client on their portal
+    if (!full && !mine) throw new HttpError(403, 'You can only update your own tasks.');
+    if (t.visibility === 'personal' || !t.client_id) throw bad('Only tasks for a client can have an update for the client.');
+    const v = str(body.clientNote, 1000, 'Update for the client');
+    if (v !== t.client_note) { sets.client_note = v; sets.client_note_at = v ? Date.now() : null; }
+  }
   for (const f of ['title', 'notes', 'priority', 'due', 'categoryId', 'clientId']) {
     if (!(f in body)) continue;
     if (!full) throw new HttpError(403, 'You can update status and progress only.');
@@ -1422,6 +1456,110 @@ function serveStatic(req, res, urlPath) {
   });
 }
 
+/* -------------------------------------------------------- client portal */
+const loginTaken = u => !!(db.prepare('SELECT 1 FROM users WHERE username = ?').get(u) || db.prepare('SELECT 1 FROM portal_accounts WHERE username = ?').get(u));
+const portalOut = a => ({ name: a.name, username: a.username, mustChange: !!a.must_change });
+route('GET', '/api/portal/me', 'portal', async (req, res, body, me) => send(res, 200, { account: portalOut(me), config: { today: localToday() } }));
+route('POST', '/api/portal/password', 'portal', async (req, res, body, me) => {
+  if (!verifyPassword(String(body.current || ''), me.password_hash)) throw bad('Current password is incorrect.');
+  const p = passwordProblem(body.next); if (p) throw bad(p);
+  if (body.next === body.current) throw bad('Choose a password different from the current one.');
+  db.prepare('UPDATE portal_accounts SET password_hash = ?, must_change = 0 WHERE id = ?').run(hashPassword(body.next), me.id);
+  db.prepare('DELETE FROM portal_sessions WHERE account_id = ? AND token_hash <> ?').run(me.id, sha(parseCookies(req)[PORTAL_COOKIE]));
+  send(res, 200, { ok: true });
+});
+// What a client sees: their companies' registration details and the progress of the firm's work for them.
+// Never portal passwords, internal instructions, staff progress notes or personal tasks.
+route('GET', '/api/portal/dashboard', 'portal', async (req, res, body, me) => {
+  const cs = db.prepare(`SELECT c.*, m.name manager_name FROM portal_access pa JOIN clients c ON c.id = pa.client_id LEFT JOIN users m ON m.id = c.manager_id
+                         WHERE pa.account_id = ? AND c.active = 1 ORDER BY c.name`).all(me.id);
+  const yearAgo = Date.now() - 400 * 864e5;
+  const q = db.prepare(`SELECT t.id, t.title, t.status, t.due, t.done_at, t.period, t.created_at, t.client_note, t.client_note_at, k.name category
+                        FROM tasks t LEFT JOIN categories k ON k.id = t.category_id
+                        WHERE t.client_id = ? AND t.visibility = 'business' AND (t.status <> 'done' OR t.done_at IS NULL OR t.done_at > ?)
+                        ORDER BY (t.status = 'done'), CASE WHEN t.due = '' OR t.due IS NULL THEN 1 ELSE 0 END, t.due, t.done_at DESC`);
+  const companies = cs.map(c => ({
+    id: c.id, name: c.name, code: c.code, entityType: c.entity_type, ntn: c.ntn, strn: c.strn,
+    scope: c.scope === 'intl' ? 'intl' : 'local', country: c.country || '', taxId: c.tax_id || '',
+    contactPerson: c.contact_person, phone: c.phone, email: c.email, partnerName: c.manager_name || '',
+    tasks: q.all(c.id, yearAgo).map(t => ({ id: t.id, title: t.title, status: t.status, due: t.due || '', doneAt: t.status === 'done' ? t.done_at : null,
+      period: t.period || '', category: t.category || '', update: t.client_note || '', updateAt: t.client_note_at || null, createdAt: t.created_at })),
+  }));
+  send(res, 200, { companies });
+});
+
+/* Managing client portal logins: owner and partners */
+const PORTAL_SELECT = 'SELECT a.*, u.name created_by_name FROM portal_accounts a LEFT JOIN users u ON u.id = a.created_by';
+function accountOut(a, me) {
+  return { id: a.id, username: a.username, name: a.name, email: a.email, phone: a.phone, active: !!a.active, mustChange: !!a.must_change,
+    lastLogin: a.last_login, createdAt: a.created_at, createdByName: a.created_by_name || '',
+    clientIds: db.prepare('SELECT client_id FROM portal_access WHERE account_id = ?').all(a.id).map(r => r.client_id),
+    canDelete: me.role === 'owner' || a.created_by === me.id };
+}
+function mgmtOnly(me) { if (!['owner', 'partner'].includes(me.role)) throw new HttpError(403, 'Only the owner and partners can manage client portal logins.'); }
+// Links to clients this person can't see are left as they are
+function setPortalClients(me, accountId, list) {
+  if (!Array.isArray(list)) throw bad('Choose the companies this client can see.');
+  const vis = visibleClientIds(me); const want = [...new Set(list.map(Number))];
+  for (const id of want) if (!db.prepare('SELECT 1 FROM clients WHERE id = ?').get(id) || (vis && !vis.includes(id))) throw bad('One of the chosen companies is not available.');
+  const keep = vis ? db.prepare('SELECT client_id FROM portal_access WHERE account_id = ?').all(accountId).map(r => r.client_id).filter(id => !vis.includes(id)) : [];
+  if (!want.length && !keep.length) throw bad('Tick at least one company.');
+  db.prepare('DELETE FROM portal_access WHERE account_id = ?').run(accountId);
+  const ins = db.prepare('INSERT INTO portal_access (account_id, client_id) VALUES (?,?)'); for (const id of [...want, ...keep]) ins.run(accountId, id);
+}
+function portalFields(body) {
+  const f = {};
+  if ('name' in body) { f.name = str(body.name, 100, 'Name'); if (!f.name) throw bad('Enter the client\'s name.'); }
+  if ('email' in body) { f.email = str(body.email, 120, 'Email'); if (f.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(f.email)) throw bad('Email address doesn\'t look right.'); }
+  if ('phone' in body) f.phone = str(body.phone, 40, 'Phone');
+  return f;
+}
+route('GET', '/api/portal-accounts', true, async (req, res, body, me) => {
+  mgmtOnly(me);
+  send(res, 200, { accounts: db.prepare(PORTAL_SELECT + ' ORDER BY a.name').all().map(a => accountOut(a, me)) });
+});
+route('POST', '/api/portal-accounts', true, async (req, res, body, me) => {
+  mgmtOnly(me);
+  const f = portalFields({ name: '', ...body }); const username = str(body.username, 40, 'Login ID');
+  if (!/^[A-Za-z0-9._@-]{3,40}$/.test(username)) throw bad('Login ID must be 3–40 letters, numbers, dots, dashes or underscores.');
+  if (loginTaken(username)) throw bad('That login ID is already taken.');
+  const p = passwordProblem(body.password); if (p) throw bad(p);
+  const id = tx(() => {
+    const r = db.prepare('INSERT INTO portal_accounts (username,password_hash,name,email,phone,created_by,created_at) VALUES (?,?,?,?,?,?,?)')
+      .run(username, hashPassword(body.password), f.name, f.email || '', f.phone || '', me.id, Date.now());
+    setPortalClients(me, Number(r.lastInsertRowid), body.clientIds || []); return Number(r.lastInsertRowid);
+  });
+  send(res, 201, { account: accountOut(db.prepare(PORTAL_SELECT + ' WHERE a.id = ?').get(id), me) });
+});
+route('PATCH', '/api/portal-accounts/:id', true, async (req, res, body, me, params) => {
+  mgmtOnly(me);
+  const a = db.prepare('SELECT * FROM portal_accounts WHERE id = ?').get(Number(params.id)); if (!a) throw new HttpError(404, 'Client login not found.');
+  const sets = portalFields(body); let endSessions = false;
+  if ('username' in body) {
+    const u = str(body.username, 40, 'Login ID');
+    if (!/^[A-Za-z0-9._@-]{3,40}$/.test(u)) throw bad('Login ID must be 3–40 letters, numbers, dots, dashes or underscores.');
+    const ex = db.prepare('SELECT id FROM portal_accounts WHERE username = ?').get(u);
+    if ((ex && ex.id !== a.id) || db.prepare('SELECT 1 FROM users WHERE username = ?').get(u)) throw bad('That login ID is already taken.');
+    sets.username = u;
+  }
+  if ('password' in body) { const p = passwordProblem(body.password); if (p) throw bad(p); sets.password_hash = hashPassword(body.password); sets.must_change = 1; endSessions = true; }
+  if ('active' in body) { sets.active = body.active ? 1 : 0; if (!body.active) endSessions = true; }
+  tx(() => {
+    const keys = Object.keys(sets);
+    if (keys.length) db.prepare(`UPDATE portal_accounts SET ${keys.map(k => k + ' = ?').join(', ')} WHERE id = ?`).run(...keys.map(k => sets[k]), a.id);
+    if ('clientIds' in body) setPortalClients(me, a.id, body.clientIds);
+    if (endSessions) db.prepare('DELETE FROM portal_sessions WHERE account_id = ?').run(a.id);
+  });
+  send(res, 200, { account: accountOut(db.prepare(PORTAL_SELECT + ' WHERE a.id = ?').get(a.id), me) });
+});
+route('DELETE', '/api/portal-accounts/:id', true, async (req, res, body, me, params) => {
+  mgmtOnly(me);
+  const a = db.prepare('SELECT * FROM portal_accounts WHERE id = ?').get(Number(params.id)); if (!a) throw new HttpError(404, 'Client login not found.');
+  if (me.role !== 'owner' && a.created_by !== me.id) throw new HttpError(403, 'Only the owner or the partner who made this login can delete it.');
+  db.prepare('DELETE FROM portal_accounts WHERE id = ?').run(a.id);
+  send(res, 200, { ok: true });
+});
+
 /* --------------------------------------------------------------- server */
 const SECURITY_HEADERS = {
   'X-Content-Type-Options': 'nosniff', 'X-Frame-Options': 'DENY', 'Referrer-Policy': 'same-origin',
@@ -1441,7 +1579,11 @@ const server = http.createServer(async (req, res) => {
     if (!r) throw new HttpError(404, 'Not found.');
     const params = url.pathname.match(r.re).groups || {};
     let me = null;
-    if (r.auth) {
+    if (r.auth === 'portal') {
+      me = portalUser(req);
+      if (!me) throw new HttpError(401, 'Please sign in.');
+      if (me.must_change && url.pathname !== '/api/portal/password' && url.pathname !== '/api/portal/me') throw new HttpError(403, 'Choose a new password first.');
+    } else if (r.auth) {
       me = sessionUser(req);
       if (!me) throw new HttpError(401, 'Please sign in.');
       if (me.must_change && url.pathname !== '/api/me/password' && url.pathname !== '/api/me') throw new HttpError(403, 'Choose a new password first.');

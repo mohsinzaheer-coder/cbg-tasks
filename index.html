@@ -56,6 +56,7 @@
         <button type="button" data-tab="intl" id="intlTab" hidden>International</button>
         <button type="button" data-tab="recurring" data-role="assign">Recurring</button>
         <button type="button" data-tab="people" data-role="mgmt">People</button>
+        <button type="button" data-tab="portal" data-role="mgmt">Client portal</button>
       </nav>
       <div class="me">
         <div class="me-id"><b id="meName"></b><span id="meRole" class="role"></span></div>
@@ -163,8 +164,80 @@
       </div>
       <div id="peopleList" class="stack-lg"></div>
     </section>
+
+    <!-- Client portal logins (owner and partners) -->
+    <section id="portalPage" class="stack-lg" hidden>
+      <div class="head">
+        <div><h1>Client portal</h1><p class="sub">Give a client a login to follow the progress of the work for their companies. One login can cover several companies. Clients see the company details, task names, status, due and completed dates, and the update for the client you write on each task. They never see portal passwords, internal instructions, progress notes or who is working on it.</p></div>
+        <button class="primary" type="button" id="newPortalBtn">+ Add client login</button>
+      </div>
+      <div id="portalList"></div>
+    </section>
   </div>
 </div>
+
+<!-- Client's own dashboard -->
+<div id="portalView" hidden>
+  <header class="bar">
+    <div class="bar-in">
+      <div class="brand"><img src="/logo-mark.png" alt="CBG" width="38" height="38"><div><b>Corporate Brilliance Global</b><span>Client portal</span></div></div>
+      <div class="me">
+        <div class="me-id"><b id="pvName"></b><span class="role">Client</span></div>
+        <button type="button" class="ghost" id="pvChangePw">Change password</button>
+        <button type="button" class="ghost" id="pvLogout">Sign out</button>
+      </div>
+    </div>
+  </header>
+  <section class="pv-hero">
+    <div class="pv-hero-in">
+      <div class="pv-hero-text">
+        <p class="pv-eyebrow" id="pvDate"></p>
+        <h1 id="pvHello">Welcome</h1>
+        <p class="pv-lead" id="pvLead"></p>
+      </div>
+      <div class="pv-ring pv-ring-lg" id="pvRing" role="img"><div><b id="pvPct">0%</b><span>work completed</span></div></div>
+    </div>
+  </section>
+  <div class="page stack-lg pv-page">
+    <div class="pv-stats" id="pvStats"></div>
+    <div class="pv-grid">
+      <div class="stack-lg pv-main">
+        <div class="pv-pick" id="pvPick" role="tablist" aria-label="Companies"></div>
+        <div id="pvCompanies" class="stack-lg"></div>
+      </div>
+      <aside class="stack-lg pv-side">
+        <section class="pv-panel"><h3>Latest updates</h3><div id="pvUpdates" class="pv-feed"></div></section>
+        <section class="pv-panel"><h3>Coming up</h3><div id="pvSoon" class="pv-soon"></div></section>
+        <section class="pv-panel pv-contact"><h3>Need anything?</h3><div id="pvContact"></div></section>
+      </aside>
+    </div>
+  </div>
+  <footer class="pv-foot"><img src="/logo-mark.png" alt="" width="22" height="22"><span>Corporate Brilliance Global</span><em>Envision · Execute · Elevate</em></footer>
+</div>
+
+<!-- Client portal login dialog -->
+<dialog id="paDlg" class="wide-dlg">
+  <form id="paForm" class="stack" method="dialog" autocomplete="off">
+    <h2 id="paTitle">Add client login</h2>
+    <div class="row2">
+      <label for="paName">Client's name<input id="paName" required maxlength="100" placeholder="e.g. Mr. Ali Raza"></label>
+      <label for="paLogin">Login ID<input id="paLogin" required maxlength="40" pattern="[A-Za-z0-9._@\-]{3,40}" placeholder="e.g. ali.raza"></label>
+    </div>
+    <div class="row2">
+      <label for="paEmail">Email<input id="paEmail" type="email" maxlength="120"></label>
+      <label for="paPhone">Phone<input id="paPhone" maxlength="40"></label>
+    </div>
+    <label for="paPass" id="paPassWrap">Temporary password<input id="paPass" minlength="8" maxlength="128"></label>
+    <div class="field"><span class="flabel">Companies this client can see <em class="req">(tick one or more)</em></span>
+      <input type="search" id="paSearch" placeholder="Find a company" aria-label="Find a company">
+      <div class="checks who-list" id="paClients" role="group" aria-label="Companies"></div>
+      <p class="help" id="paSel"></p>
+    </div>
+    <p class="help" id="paHelp">They'll be asked to choose their own password at first sign-in. They sign in on the same page as your staff.</p>
+    <p class="form-error" id="paError" role="alert" hidden></p>
+    <div class="dlg-actions"><button type="button" class="ghost" data-close>Cancel</button><button class="primary" type="submit" id="paSave">Add client login</button></div>
+  </form>
+</dialog>
 
 <!-- Task dialog -->
 <dialog id="taskDlg">
@@ -208,7 +281,8 @@
   <form id="noteForm" class="stack" method="dialog" autocomplete="off">
     <h2>Progress note</h2>
     <p class="help" id="noteFor"></p>
-    <label for="nText">What's the latest?<textarea id="nText" maxlength="1000" rows="4"></textarea></label>
+    <label for="nText">What's the latest? <span class="help-inline">(internal, the team sees this)</span><textarea id="nText" maxlength="1000" rows="4"></textarea></label>
+    <label for="nClient" id="nClientWrap">Update for the client <span class="help-inline">(shown on the client's portal)</span><textarea id="nClient" maxlength="1000" rows="3" placeholder="e.g. Return prepared. Waiting for your October bank statement."></textarea></label>
     <div class="dlg-actions"><button type="button" class="ghost" data-close>Cancel</button><button class="primary" type="submit">Save note</button></div>
   </form>
 </dialog>

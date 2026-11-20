@@ -60,18 +60,18 @@
   }
 
   /* ---------- auth views ---------- */
-  function show(view) { $('#loginView').hidden = view !== 'login'; $('#pwView').hidden = view !== 'password'; $('#appView').hidden = view !== 'app'; }
+  function show(view) { $('#loginView').hidden = view !== 'login'; $('#pwView').hidden = view !== 'password'; $('#appView').hidden = view !== 'app'; $('#portalView').hidden = view !== 'portal'; }
   async function boot() {
     try { const r = await api('GET', '/api/me'); state.me = r.user; state.config = r.config; state.loadedOn = new Date().toDateString(); }
-    catch { show('login'); return; }
+    catch { return bootPortal(); }
     if (state.me.mustChange) return openPassword(true);
     enterApp();
   }
   $('#loginForm').addEventListener('submit', async e => {
     e.preventDefault(); showErr('#loginError'); const b = e.submitter; b.disabled = true;
     try {
-      await api('POST', '/api/login', { username: $('#lUser').value.trim(), password: $('#lPass').value });
-      $('#loginForm').reset(); await boot();
+      const r = await api('POST', '/api/login', { username: $('#lUser').value.trim(), password: $('#lPass').value });
+      $('#loginForm').reset(); if (r.portal) await bootPortal(); else await boot();
     } catch (err) { showErr('#loginError', err.message); }
     finally { b.disabled = false; }
   });
@@ -81,13 +81,16 @@
     $('#pwHelp').hidden = !forced; $('#pwCancel').hidden = forced;
     show('password'); $('#pCur').focus();
   }
-  $('#pwCancel').onclick = () => show('app');
+  $('#pwCancel').onclick = () => show(pv.account ? 'portal' : 'app');
   $('#changePw').onclick = () => openPassword(false);
   $('#pwForm').addEventListener('submit', async e => {
     e.preventDefault(); showErr('#pwError');
     if ($('#pNew').value !== $('#pNew2').value) return showErr('#pwError', 'The two new passwords don\'t match.');
     const b = e.submitter; b.disabled = true;
-    try { await api('POST', '/api/me/password', { current: $('#pCur').value, next: $('#pNew').value }); state.me.mustChange = false; toast('Password saved'); enterApp(); }
+    try {
+      if (pv.account) { await api('POST', '/api/portal/password', { current: $('#pCur').value, next: $('#pNew').value }); pv.account.mustChange = false; toast('Password saved'); return enterPortal(); }
+      await api('POST', '/api/me/password', { current: $('#pCur').value, next: $('#pNew').value }); state.me.mustChange = false; toast('Password saved'); enterApp();
+    }
     catch (err) { showErr('#pwError', err.message); }
     finally { b.disabled = false; }
   });
@@ -96,7 +99,7 @@
   const mgmt = () => state.me && (state.me.role === 'owner' || state.me.role === 'partner');
   const seesAll = () => state.me && (state.me.role === 'owner' || state.me.role === 'partner');
   async function enterApp() {
-    show('app'); const me = state.me;
+    pv.account = null; show('app'); const me = state.me;
     $('#meName').textContent = me.name; $('#meRole').textContent = ROLE[me.role] + (me.title && me.title !== ROLE[me.role] ? ' · ' + me.title : '');
     document.querySelectorAll('#tabs [data-role="assign"]').forEach(b => b.hidden = !lead());
     document.querySelectorAll('#tabs [data-role="mgmt"]').forEach(b => b.hidden = !mgmt());
@@ -117,7 +120,7 @@
     $('#catPanel').hidden = me.role !== 'owner';
     $('#importRulesBtn').hidden = me.role !== 'owner';
     $('#importClientsBtn').hidden = me.role !== 'owner';
-    if ((!lead() && ['recurring', 'feed'].includes(state.tab)) || (!mgmt() && state.tab === 'people')) state.tab = 'tasks';
+    if ((!lead() && ['recurring', 'feed'].includes(state.tab)) || (!mgmt() && ['people', 'portal'].includes(state.tab))) state.tab = 'tasks';
     setTab(state.tab);
     await refresh();
   }
@@ -125,7 +128,9 @@
     try {
       const calls = [api('GET', '/api/users'), api('GET', '/api/tasks'), api('GET', '/api/clients'), api('GET', '/api/categories')];
       if (lead()) calls.push(api('GET', '/api/recurring'), api('GET', '/api/personal'));
-      const [u, t, c, k, r, pl] = await Promise.all(calls);
+      if (mgmt()) calls.push(api('GET', '/api/portal-accounts'));
+      const [u, t, c, k, r, pl, pa] = await Promise.all(calls);
+      state.portalAccounts = pa ? pa.accounts : [];
       state.users = u.users; state.tasks = t.tasks; state.clients = c.clients; state.categories = k.categories; state.rules = r ? r.rules : [];
       state.personal = pl || { categories: [], projects: [] };
       render();
@@ -139,14 +144,14 @@
     document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === t));
     const page = t === 'intl' ? 'clients' : t; // International reuses the Clients page, showing international clients
     if (t === 'clients' || t === 'intl') state.clientScope = t === 'intl' ? 'intl' : 'local';
-    for (const p of ['tasks', 'feed', 'clients', 'recurring', 'people']) $('#' + p + 'Page').hidden = p !== page;
+    for (const p of ['tasks', 'feed', 'clients', 'recurring', 'people', 'portal']) $('#' + p + 'Page').hidden = p !== page;
   }
   $('#tabs').addEventListener('click', e => { const b = e.target.closest('button[data-tab]'); if (b) { setTab(b.dataset.tab); render(); } });
   function render() {
     $('#intlTab').hidden = !(mgmt() || state.clients.some(c => c.scope === 'intl'));
     renderFilters(); renderBoards(); renderClients();
     if (lead()) renderRules();
-    if (mgmt()) renderPeople();
+    if (mgmt()) { renderPeople(); renderPortalAdmin(); }
   }
   function renderBoards() { renderTasks(); if (lead()) renderFeed(); }
 
@@ -277,6 +282,48 @@
     if (!col) return; const n = $('#' + host.id)?.querySelector(`[data-colf="${col}"]`);
     if (n) { n.focus(); if (pos != null && n.setSelectionRange) n.setSelectionRange(pos, pos); }
   }
+  /* Recurring tasks are grouped under their category: one summary row per category, click to open it */
+  let groupRec = true; try { groupRec = localStorage.getItem('cbg-group-rec') !== '0'; } catch { }
+  const grpOpen = new Set(); const grpTab = {};
+  const GRP_TABS = [['todo', 'Pending'], ['doing', 'In progress'], ['done', 'Done'], ['all', 'All']];
+  function groupToggle() {
+    const l = el('label', 'grp-switch'); const i = el('input'); i.type = 'checkbox'; i.checked = groupRec;
+    i.onchange = () => { groupRec = i.checked; try { localStorage.setItem('cbg-group-rec', groupRec ? '1' : '0'); } catch { } renderBoards(); };
+    l.append(i, document.createTextNode(' Group recurring by category')); return l;
+  }
+  function groupRows(host, groups, cur, tb) {
+    const ncol = TCOLS.length + 1;
+    for (const [name, all] of groups) {
+      const key = host.id + '|' + name; const open = grpOpen.has(key);
+      const n = { todo: 0, doing: 0, done: 0, late: 0 }; for (const t of all) { n[t.status]++; if (isLate(t)) n.late++; }
+      const clients = new Set(all.map(t => t.clientId).filter(Boolean)).size;
+      const tr = el('tr', 'grp-row' + (open ? ' open' : '')); const td = el('td'); td.colSpan = ncol;
+      const head = el('div', 'grp-head');
+      const tog = btn('', 'grp-toggle', () => { open ? grpOpen.delete(key) : grpOpen.add(key); renderBoards(); });
+      tog.setAttribute('aria-expanded', open); tog.title = (open ? 'Close ' : 'Open ') + name;
+      const tx = el('span', 'grp-title'); tx.append(el('b', null, name), el('small', null, `${all.length} recurring task${all.length === 1 ? '' : 's'}${clients ? ` · ${clients} client${clients === 1 ? '' : 's'}` : ''}`));
+      tog.append(el('span', 'grp-chev', '▸'), el('span', 'grp-ic', '↻'), tx);
+      const pct = all.length ? Math.round(n.done / all.length * 100) : 0;
+      const bar = el('span', 'grp-bar'); const fill = el('i'); fill.style.width = pct + '%'; bar.append(fill); bar.title = pct + '% done';
+      const chips = el('span', 'grp-chips'); const sel = grpTab[key] || 'all';
+      for (const [k, l] of GRP_TABS.slice(0, 3)) {
+        const c = btn('', 'grp-chip g-' + k + (open && sel === k ? ' on' : ''), () => { grpTab[key] = sel === k && open ? 'all' : k; grpOpen.add(key); renderBoards(); });
+        c.append(el('b', null, String(n[k])), document.createTextNode(' ' + l)); c.disabled = !n[k]; chips.append(c);
+      }
+      if (n.late) chips.append(el('span', 'grp-chip g-late', `${n.late} overdue`));
+      head.append(tog, bar, chips); td.append(head); tr.append(td); tb.append(tr);
+      if (!open) continue;
+      let rows = all.filter(t => sel === 'all' || t.status === sel);
+      rows = sortByCol(host.id, sortTasks(rows, sel));
+      const cap = 100, more = rows.length - cap; if (more > 0) rows = rows.slice(0, cap);
+      for (const t of rows) { const r = taskRow(t); r.classList.add('grp-child'); tb.append(r); }
+      const ft = el('tr', 'grp-child grp-foot'); const fd = el('td'); fd.colSpan = ncol;
+      if (!rows.length) fd.append(el('span', 'help', 'No ' + GRP_TABS.find(x => x[0] === sel)[1].toLowerCase() + ' tasks in this category. '));
+      if (more > 0) fd.append(el('span', 'help', `Showing ${cap} of ${cap + more}. Use the column filters to narrow it down. `));
+      if (sel !== 'all') fd.append(btn('Show all ' + all.length, 'link', () => { grpTab[key] = 'all'; renderBoards(); }));
+      if (fd.childNodes.length) { ft.append(fd); tb.append(ft); }
+    }
+  }
   function drawLanes(host, tasks, emptyText) {
     host.className = 'task-host'; host.replaceChildren();
     const cur = statusTab[host.id] || 'all';
@@ -313,15 +360,23 @@
       note.append(document.createTextNode([nFilters ? `${nFilters} column filter${nFilters > 1 ? 's' : ''}` : '', cs.sort ? 'sorted by ' + TCOLS.find(c => c.key === cs.sort.key).label.toLowerCase() : ''].filter(Boolean).join(', ') + ' '));
       note.append(btn('Clear', 'link', () => { colState[host.id] = { sort: null, f: {} }; renderBoards(); })); bar.append(note);
     }
-    bar.append(viewToggle()); host.append(bar);
+    bar.append(groupToggle(), viewToggle()); host.append(bar);
     if (cur === 'open' || cur === 'overdue') {
       const note = el('span', 'filter-note'); note.append(document.createTextNode('Showing ' + STATUS_LABEL[cur].toLowerCase() + ' tasks '));
       note.append(btn('Show all', 'link', () => { statusTab[host.id] = 'all'; renderBoards(); })); bar.insertBefore(note, bar.lastChild);
     }
+    // Recurring tasks go into category groups; a group shows when any of its tasks fits the chosen status tab
+    let groups = [];
+    if (groupRec) {
+      const m = new Map();
+      for (const t of tasks) if (t.recurringId) { const k = t.categoryName || 'Other recurring'; if (!m.has(k)) m.set(k, []); m.get(k).push(t); }
+      groups = [...m].filter(([, a]) => a.some(t => inStatus(t, cur))).sort((a, b) => a[0].localeCompare(b[0]));
+      tasks = tasks.filter(t => !t.recurringId);
+    }
     let list = sortByCol(host.id, sortTasks(tasks.filter(t => inStatus(t, cur)), cur === 'open' || cur === 'overdue' ? 'all' : cur));
     const total = list.length;
     if (cur === 'done' || cur === 'all') list = list.slice(0, 200);
-    if (!list.length && !nFilters) { host.append(el('div', 'lane-empty', !tasks.length && emptyText ? emptyText : `No ${cur === 'all' ? '' : STATUS_LABEL[cur].toLowerCase() + ' '}tasks here.`)); return; }
+    if (!list.length && !groups.length && !nFilters) { host.append(el('div', 'lane-empty', !tasks.length && emptyText ? emptyText : `No ${cur === 'all' ? '' : STATUS_LABEL[cur].toLowerCase() + ' '}tasks here.`)); return; }
     const wrap = el('div', 'table-wrap'); const table = el('table', 'table tasks-table');
     const thead = el('thead'); const hr = el('tr'); const fr = el('tr', 'col-filters');
     const hasProj = host.id !== 'lanes' || tasks.some(t => t.visibility === 'personal');
@@ -346,8 +401,10 @@
     }
     hr.append(el('th')); fr.append(el('th'));
     thead.append(hr, fr); table.append(thead);
-    const tb = el('tbody'); for (const t of list) tb.append(taskRow(t));
-    if (!list.length) { const tr = el('tr'); const td = el('td', 'lane-empty', 'No tasks match these column filters.'); td.colSpan = TCOLS.length + 1; tr.append(td); tb.append(tr); }
+    const tb = el('tbody'); groupRows(host, groups, cur, tb);
+    if (groups.length && list.length) { const tr = el('tr', 'grp-sep'); const td = el('td', null, 'Other tasks'); td.colSpan = TCOLS.length + 1; tr.append(td); tb.append(tr); }
+    for (const t of list) tb.append(taskRow(t));
+    if (!list.length && !groups.length) { const tr = el('tr'); const td = el('td', 'lane-empty', 'No tasks match these column filters.'); td.colSpan = TCOLS.length + 1; tr.append(td); tb.append(tr); }
     table.append(tb);
     wrap.append(table); host.append(wrap);
     if (total > list.length) host.append(el('p', 'help', `Showing ${list.length} of ${total}. Use the filters or search to narrow it down.`));
@@ -366,6 +423,7 @@
     if (tags.children.length) td.append(tags);
     if (t.notes) td.append(el('small', 'tt-notes', t.notes));
     if (t.progress) { const p = el('small', 'tt-progress'); p.append(el('b', null, 'Progress: '), document.createTextNode(t.progress)); td.append(p); }
+    if (t.clientNote) { const p = el('small', 'tt-client-note'); p.append(el('b', null, 'Client sees: '), document.createTextNode(t.clientNote)); td.append(p); }
     tr.append(td);
     const ctd = el('td', null, t.visibility === 'personal' ? (t.projectName || '—') : (t.clientName || '—'));
     if (clientById(t.clientId)?.scope === 'intl') { ctd.append(document.createTextNode(' ')); ctd.append(el('span', 'chip intl', 'Intl')); }
@@ -401,7 +459,7 @@
     if (state.confirm === key) {
       ac.append(el('span', null, 'Delete? '), btn('Delete', 'ghost danger', () => delTask(t)), btn('Keep', 'ghost', () => { state.confirm = null; renderBoards(); }));
     } else {
-      if (mine || t.canEdit) ac.append(btn(t.progress ? 'Note' : 'Add note', 'ghost', () => openNote(t)));
+      if (mine || t.canEdit) ac.append(btn(t.progress || t.clientNote ? 'Note' : 'Add note', 'ghost', () => openNote(t)));
       if (t.clientId && clientById(t.clientId)) ac.append(btn('Logins', 'ghost', () => { state.clientId = t.clientId; setTab(clientById(t.clientId)?.scope === 'intl' ? 'intl' : 'clients'); render(); }));
       if (t.canEdit) ac.append(btn('Edit', 'ghost', () => openTask(t)));
       if (t.canDelete) ac.append(btn('Delete', 'ghost danger', () => { state.confirm = key; renderBoards(); }));
@@ -455,6 +513,7 @@
     c.append(el('p', 'card-t', t.title));
     if (t.notes) c.append(el('p', 'card-n', t.notes));
     if (t.progress) { const p = el('p', 'progress'); p.append(el('b', null, 'Progress'), document.createTextNode(t.progress)); c.append(p); }
+    if (t.clientNote) { const p = el('p', 'progress client-note'); p.append(el('b', null, 'Client sees'), document.createTextNode(t.clientNote)); c.append(p); }
     if (t.partnerNames.length) { const p = el('p', 'partners-line'); p.append(document.createTextNode('Partners: '), el('b', null, t.partnerNames.join(', '))); c.append(p); }
     const m = el('div', 'meta');
     m.append(el('span', 'pill p-' + t.priority, t.priority));
@@ -796,8 +855,16 @@
     finally { b.disabled = false; }
   });
   let noteTask = null;
-  function openNote(t) { noteTask = t; $('#noteFor').textContent = t.title; $('#nText').value = t.progress || ''; $('#noteDlg').showModal(); $('#nText').focus(); }
-  $('#noteForm').addEventListener('submit', async e => { e.preventDefault(); if (await patchTask(noteTask, { progress: $('#nText').value.trim() }, 'Note saved')) $('#noteDlg').close(); });
+  function openNote(t) {
+    noteTask = t; $('#noteFor').textContent = t.title; $('#nText').value = t.progress || '';
+    const forClient = t.visibility !== 'personal' && !!t.clientId; $('#nClientWrap').hidden = !forClient; $('#nClient').value = t.clientNote || '';
+    $('#noteDlg').showModal(); $('#nText').focus();
+  }
+  $('#noteForm').addEventListener('submit', async e => {
+    e.preventDefault(); const patch = { progress: $('#nText').value.trim() };
+    if (!$('#nClientWrap').hidden) patch.clientNote = $('#nClient').value.trim();
+    if (await patchTask(noteTask, patch, 'Note saved')) $('#noteDlg').close();
+  });
 
   /* ---------- clients ---------- */
   function filteredClients() {
@@ -1425,6 +1492,232 @@
         : `Imported ${res.imported} recurring task${res.imported === 1 ? '' : 's'}` + (res.tasksCreated ? `. ${res.tasksCreated} added to the task board now.` : '.'));
       importRows = null; $('#importFile').value = '';
     } catch (err) { showErr('#importError', err.message); b.disabled = false; b.textContent = 'Try again'; }
+  });
+
+  /* ---------- client portal: the client's own view ---------- */
+  const pv = { account: null, companies: [], pick: 'all', tab: {} };
+  async function bootPortal() {
+    try { const r = await api('GET', '/api/portal/me'); pv.account = r.account; state.config = r.config; state.loadedOn = new Date().toDateString(); }
+    catch { pv.account = null; show('login'); return; }
+    state.me = null;
+    if (pv.account.mustChange) return openPassword(true);
+    enterPortal();
+  }
+  async function enterPortal() {
+    show('portal'); $('#pvName').textContent = pv.account.name;
+    await refreshPortal();
+  }
+  async function refreshPortal() {
+    try { const r = await api('GET', '/api/portal/dashboard'); pv.companies = r.companies; renderPortal(); }
+    catch (err) { if (err.status !== 401) toast(err.message); }
+  }
+  $('#pvChangePw').onclick = () => openPassword(false);
+  $('#pvLogout').onclick = async () => { try { await api('POST', '/api/logout'); } catch { } pv.account = null; show('login'); $('#lUser').focus(); };
+  setInterval(() => { if (pv.account && !document.hidden && !$('#portalView').hidden && !document.querySelector('dialog[open]')) refreshPortal(); }, 120000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden && pv.account && !$('#portalView').hidden) refreshPortal(); });
+  const PV_STATUS = { todo: 'Not started', doing: 'In progress', done: 'Completed' };
+  const ymdPlus = n => { const d = new Date(today() + 'T00:00:00'); d.setDate(d.getDate() + n); return d.toLocaleDateString('en-CA'); };
+  const daysUntil = ymd => Math.round((new Date(ymd + 'T00:00:00') - new Date(today() + 'T00:00:00')) / 864e5);
+  const doneYmd = ms => new Date(ms).toLocaleDateString('en-CA', { timeZone: 'Asia/Karachi' });
+  const coInitials = n => (n || '?').replace(/\(.*?\)|\b(private|pvt|limited|ltd|llc|inc|smc)\b\.?/gi, '').trim().split(/\s+/).filter(Boolean).slice(0, 2).map(w => w[0]).join('').toUpperCase() || '?';
+  function ring(pct, cls) { const r = el('div', 'pv-ring ' + (cls || '')); r.style.setProperty('--p', pct); r.setAttribute('role', 'img'); r.setAttribute('aria-label', pct + '% of work completed'); const d = el('div'); d.append(el('b', null, pct + '%')); r.append(d); return r; }
+  function dueHint(t) {
+    if (t.status === 'done' || !t.due) return '';
+    const n = daysUntil(t.due); return n === 0 ? 'Today' : n === 1 ? 'Tomorrow' : n > 1 && n <= 30 ? `In ${n} days` : '';
+  }
+  // Small line icons drawn with SVG so they look the same on every device
+  const PV_ICONS = {
+    clock: 'M12 7v5l3 2M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z',
+    spin: 'M20 11a8 8 0 0 0-14.6-4.5M4 4v3.5h3.5M4 13a8 8 0 0 0 14.6 4.5M20 20v-3.5h-3.5',
+    cal: 'M7 3v3M17 3v3M4 9h16M5 5h14a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1ZM8 13h3v3H8z',
+    check: 'M5 12.5l4.5 4.5L19 7.5',
+  };
+  function pvIcon(k) {
+    const ns = 'http://www.w3.org/2000/svg', w = el('span', 'pv-ic'), svg = document.createElementNS(ns, 'svg'), path = document.createElementNS(ns, 'path');
+    svg.setAttribute('viewBox', '0 0 24 24'); svg.setAttribute('aria-hidden', 'true'); path.setAttribute('d', PV_ICONS[k]); svg.append(path); w.append(svg); return w;
+  }
+  function renderPortal() {
+    const cos = pv.companies; if (pv.pick !== 'all' && !cos.some(c => c.id === pv.pick)) pv.pick = 'all';
+    const shown = pv.pick === 'all' ? cos : cos.filter(c => c.id === pv.pick);
+    const all = cos.flatMap(c => c.tasks.map(t => ({ ...t, co: c })));
+    const tasks = shown.flatMap(c => c.tasks), td = today(), lim = ymdPlus(30);
+    // hero
+    const hr = Number(new Date().toLocaleString('en-US', { hour: 'numeric', hour12: false, timeZone: 'Asia/Karachi' }));
+    $('#pvHello').textContent = `${hr < 12 ? 'Good morning' : hr < 17 ? 'Good afternoon' : 'Good evening'}, ${pv.account.name}`;
+    $('#pvDate').textContent = new Date().toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', timeZone: 'Asia/Karachi' });
+    const open = all.filter(t => t.status !== 'done').length, soon = all.filter(t => t.status !== 'done' && t.due && t.due >= td && t.due <= lim).length;
+    $('#pvLead').textContent = `${cos.length} ${cos.length === 1 ? 'company' : 'companies'} · ${open} open ${open === 1 ? 'item' : 'items'} · ${soon} due in the next 30 days`;
+    const pctAll = all.length ? Math.round(all.filter(t => t.status === 'done').length / all.length * 100) : 0;
+    $('#pvRing').style.setProperty('--p', pctAll); $('#pvPct').textContent = pctAll + '%'; $('#pvRing').setAttribute('aria-label', pctAll + '% of work completed');
+    // stat cards
+    const stats = [
+      ['open', 'clock', 'Open', tasks.filter(t => t.status !== 'done').length, 'Work still to finish'],
+      ['doing', 'spin', 'In progress', tasks.filter(t => t.status === 'doing').length, 'Our team is on it'],
+      ['soon', 'cal', 'Due in 30 days', tasks.filter(t => t.status !== 'done' && t.due && t.due >= td && t.due <= lim).length, 'Coming deadlines'],
+      ['done', 'check', 'Completed', tasks.filter(t => t.status === 'done').length, 'In the last 12 months'],
+    ];
+    $('#pvStats').replaceChildren(...stats.map(([k, ic, l, n, hint]) => {
+      const d = el('div', 'pv-stat pv-stat-' + k); d.append(pvIcon(ic));
+      const tx = el('div'); tx.append(el('b', null, String(n)), el('span', 'pv-stat-l', l), el('small', null, hint)); d.append(tx); return d;
+    }));
+    // company picker
+    const pick = $('#pvPick'); pick.replaceChildren(); pick.hidden = cos.length < 2;
+    for (const c of [{ id: 'all', name: 'All companies', n: open }, ...cos.map(c => ({ id: c.id, name: c.name, n: c.tasks.filter(t => t.status !== 'done').length }))]) {
+      const on = pv.pick === c.id; const b = btn('', on ? 'on' : '', () => { pv.pick = c.id; renderPortal(); });
+      b.append(el('span', 'pv-mono sm', c.id === 'all' ? '★' : coInitials(c.name)), el('span', 'pv-pick-n', c.name), el('span', 'pv-pick-c', String(c.n)));
+      b.title = `${c.name}: ${c.n} open`; b.setAttribute('role', 'tab'); b.setAttribute('aria-selected', on); pick.append(b);
+    }
+    // companies
+    const host = $('#pvCompanies'); host.replaceChildren();
+    if (!cos.length) host.append(el('div', 'lane-empty', 'No companies are linked to your login yet. Please contact Corporate Brilliance Global.'));
+    for (const c of shown) host.append(portalCompany(c));
+    // side: latest updates
+    const ups = all.filter(t => t.update && (pv.pick === 'all' || t.co.id === pv.pick)).sort((a, b) => (b.updateAt || 0) - (a.updateAt || 0)).slice(0, 6);
+    const feed = $('#pvUpdates'); feed.replaceChildren();
+    if (!ups.length) feed.append(el('p', 'pv-none', 'Updates from our team will appear here.'));
+    for (const t of ups) {
+      const it = el('article', 'pv-feed-it'); it.append(el('span', 'pv-mono sm', coInitials(t.co.name)));
+      const b = el('div'); b.append(el('small', 'pv-feed-co', t.co.name), el('b', null, t.title), el('p', null, t.update)); if (t.updateAt) b.append(el('time', null, fmtStamp(t.updateAt)));
+      it.append(b); feed.append(it);
+    }
+    // side: coming up
+    const nx = all.filter(t => t.status !== 'done' && t.due && t.due >= td && (pv.pick === 'all' || t.co.id === pv.pick)).sort((a, b) => a.due.localeCompare(b.due)).slice(0, 6);
+    const so = $('#pvSoon'); so.replaceChildren();
+    if (!nx.length) so.append(el('p', 'pv-none', 'Nothing due right now.'));
+    for (const t of nx) {
+      const d = new Date(t.due + 'T00:00:00'); const it = el('div', 'pv-soon-it');
+      const cal = el('div', 'pv-cal'); cal.append(el('b', null, String(d.getDate())), el('span', null, d.toLocaleDateString(undefined, { month: 'short' })));
+      const b = el('div'); b.append(el('b', null, t.title), el('small', null, t.co.name + (dueHint(t) ? ' · ' + dueHint(t) : '')));
+      it.append(cal, b); so.append(it);
+    }
+    // side: contact
+    const ct = $('#pvContact'); ct.replaceChildren();
+    const partners = [...new Set(cos.map(c => c.partnerName).filter(Boolean))];
+    ct.append(el('p', null, partners.length ? 'Questions about your work? Speak to your partner in charge:' : 'Questions about your work? Contact Corporate Brilliance Global.'));
+    for (const n of partners) { const r = el('div', 'pv-person'); r.append(el('span', 'av', initials(n))); const tx = el('div'); tx.append(el('b', null, n), el('small', null, cos.filter(c => c.partnerName === n).map(c => c.name).join(', '))); r.append(tx); ct.append(r); }
+  }
+  function portalCompany(c) {
+    const box = el('section', 'pv-co'); const tab = pv.tab[c.id] || 'open';
+    const head = el('div', 'pv-co-head');
+    head.append(el('span', 'pv-mono', coInitials(c.name)));
+    const h = el('div', 'pv-co-id'); h.append(el('h2', null, c.name));
+    const tags = el('div', 'pv-tags');
+    const bits = [[c.scope === 'intl' ? (c.country || 'International') : c.entityType, ''], c.code && ['Code', c.code], c.ntn && ['NTN', c.ntn], c.strn && ['STRN', c.strn], c.scope === 'intl' && c.taxId && ['Tax ID', c.taxId]].filter(x => x && (x[0] || x[1]));
+    for (const [k, v] of bits) { const t = el('span', 'pv-tag'); if (v) { t.append(el('em', null, k + ' '), document.createTextNode(v)); } else t.textContent = k; tags.append(t); }
+    h.append(tags);
+    if (c.partnerName) { const p = el('p', 'pv-partner'); p.append(el('span', 'av sm', initials(c.partnerName)), document.createTextNode('Partner in charge: '), el('b', null, c.partnerName)); h.append(p); }
+    head.append(h);
+    const total = c.tasks.length, done = c.tasks.filter(t => t.status === 'done').length, pct = total ? Math.round(done / total * 100) : 0;
+    const pr = el('div', 'pv-co-prog'); pr.append(ring(pct)); const pt = el('div'); pt.append(el('b', null, `${done} of ${total}`), el('small', null, total ? 'completed' : 'No work recorded yet')); pr.append(pt);
+    head.append(pr); box.append(head);
+    const counts = { open: c.tasks.filter(t => t.status !== 'done').length, done, all: total };
+    const tabs = el('div', 'status-tabs pv-tabs'); tabs.setAttribute('role', 'tablist');
+    for (const [k, l] of [['open', 'Open'], ['done', 'Completed'], ['all', 'All']]) {
+      const b = btn(l + ' ', 'st-tab' + (tab === k ? ' on' : ''), () => { pv.tab[c.id] = k; renderPortal(); });
+      b.setAttribute('role', 'tab'); b.setAttribute('aria-selected', tab === k); b.append(el('span', 'st-count', String(counts[k]))); tabs.append(b);
+    }
+    box.append(tabs);
+    const list = c.tasks.filter(t => tab === 'all' || (tab === 'done' ? t.status === 'done' : t.status !== 'done'));
+    if (!list.length) { box.append(el('p', 'pv-none pv-empty', tab === 'done' ? 'Nothing completed in the last 12 months.' : '✓ All caught up. No open work right now.')); return box; }
+    const table = el('table', 'pv-table'); const hr = el('tr');
+    for (const x of ['Work', 'Due', 'Status', 'Completed', 'Latest update']) hr.append(el('th', null, x));
+    const thead = el('thead'); thead.append(hr); table.append(thead); const tb = el('tbody');
+    for (const t of list) {
+      const tr = el('tr', 'pv-row-' + t.status);
+      const cell = (label, cls) => { const d = el('td', cls); d.dataset.label = label; tr.append(d); return d; };
+      const a = cell('Work', 'pv-work'); a.append(el('b', null, t.title)); if (t.category) a.append(el('span', 'pv-cat', t.category));
+      const du = cell('Due', 'nowrap'); du.append(document.createTextNode(t.due ? fmtDate(t.due) : '—')); if (dueHint(t)) du.append(el('small', 'pv-hint', dueHint(t)));
+      const st = cell('Status'); st.append(el('span', 'pv-st pv-st-' + t.status, PV_STATUS[t.status]));
+      const cd = cell('Completed', 'nowrap'); cd.textContent = t.doneAt ? fmtDate(doneYmd(t.doneAt)) : '—'; if (!t.doneAt) cd.classList.add('pv-nil');
+      const u = cell('Latest update', 'pv-upd');
+      if (t.update) { const q = el('div', 'pv-quote'); q.append(el('p', null, t.update)); if (t.updateAt) q.append(el('time', null, fmtStamp(t.updateAt))); u.append(q); } else { u.textContent = '—'; u.classList.add('pv-nil'); }
+      tb.append(tr);
+    }
+    table.append(tb); const wrap = el('div', 'pv-table-wrap'); wrap.append(table); box.append(wrap); return box;
+  }
+
+  /* ---------- client portal logins (owner and partners) ---------- */
+  let paEditing = null;
+  function renderPortalAdmin() {
+    const host = $('#portalList'); host.replaceChildren(); const list = state.portalAccounts || [];
+    if (!list.length) { host.append(el('div', 'lane-empty', 'No client logins yet. Use “Add client login” to give a client access to their companies.')); return; }
+    const wrap = el('div', 'table-wrap'); const table = el('table', 'table'); const hr = el('tr');
+    for (const x of ['Client', 'Login ID', 'Companies', 'Last sign-in', 'Status', '']) hr.append(el('th', null, x));
+    const th = el('thead'); th.append(hr); table.append(th); const tb = el('tbody');
+    for (const a of list) {
+      const tr = el('tr'); const n = el('td'); n.append(el('b', null, a.name)); if (a.email || a.phone) n.append(el('small', 'muted-line', [a.email, a.phone].filter(Boolean).join(' · '))); tr.append(n);
+      tr.append(el('td', null, a.username));
+      const known = a.clientIds.map(clientById).filter(Boolean), other = a.clientIds.length - known.length;
+      const co = el('td', 'pa-cos'); for (const c of known) co.append(el('span', 'chip client', c.name)); if (other) co.append(el('span', 'chip', `+${other} other`)); tr.append(co);
+      tr.append(el('td', 'nowrap', a.lastLogin ? fmtStamp(a.lastLogin) : 'Never'));
+      tr.append(el('td', null, !a.active ? 'Deactivated' : a.mustChange ? 'Waiting for first sign-in' : 'Active'));
+      const ac = el('td', 'acts'); const key = 'pa:' + a.id;
+      if (state.confirm === key) ac.append(el('span', null, 'Delete? '), btn('Delete', 'ghost danger', () => paDelete(a)), btn('Keep', 'ghost', () => { state.confirm = null; renderPortalAdmin(); }));
+      else {
+        ac.append(btn('Edit', 'ghost', () => openPortalAccount(a)), btn('Reset password', 'ghost', () => openPortalAccount(a, true)));
+        ac.append(btn(a.active ? 'Deactivate' : 'Activate', 'ghost', () => paPatch(a, { active: !a.active }, a.active ? 'Login deactivated' : 'Login activated')));
+        if (a.canDelete) ac.append(btn('Delete', 'ghost danger', () => { state.confirm = key; renderPortalAdmin(); }));
+      }
+      tr.append(ac); tb.append(tr);
+    }
+    table.append(tb); wrap.append(table); host.append(wrap);
+  }
+  async function paPatch(a, body, msg) {
+    try { const { account } = await api('PATCH', '/api/portal-accounts/' + a.id, body); state.portalAccounts = state.portalAccounts.map(x => x.id === account.id ? account : x); renderPortalAdmin(); toast(msg); }
+    catch (err) { toast(err.message); }
+  }
+  async function paDelete(a) {
+    state.confirm = null;
+    try { await api('DELETE', '/api/portal-accounts/' + a.id); state.portalAccounts = state.portalAccounts.filter(x => x.id !== a.id); renderPortalAdmin(); toast('Client login deleted'); }
+    catch (err) { toast(err.message); renderPortalAdmin(); }
+  }
+  function paRenderClients() {
+    const q = $('#paSearch').value.trim().toLowerCase(); const box = $('#paClients'); const picked = paEditing.picked;
+    box.replaceChildren();
+    const cs = state.clients.filter(c => c.active || picked.has(c.id)).sort((a, b) => (picked.has(b.id) - picked.has(a.id)) || a.name.localeCompare(b.name));
+    for (const c of cs) {
+      if (q && !`${c.name} ${c.code} ${c.ntn}`.toLowerCase().includes(q)) continue;
+      const l = el('label'); const i = el('input'); i.type = 'checkbox'; i.checked = picked.has(c.id);
+      i.onchange = () => { i.checked ? picked.add(c.id) : picked.delete(c.id); paSelText(); };
+      l.append(i, document.createTextNode(' ' + c.name)); if (c.scope === 'intl') { l.append(document.createTextNode(' ')); l.append(el('span', 'chip intl', 'Intl')); }
+      box.append(l);
+    }
+    if (!box.children.length) box.append(el('small', 'muted-line', 'No company matches.'));
+    paSelText();
+  }
+  function paSelText() { const n = [...paEditing.picked].map(clientById).filter(Boolean).map(c => c.name); $('#paSel').textContent = n.length ? 'Ticked: ' + n.join(', ') : 'No company ticked yet.'; }
+  function openPortalAccount(a, resetOnly) {
+    paEditing = { a, resetOnly, picked: new Set(a ? a.clientIds.filter(id => clientById(id)) : []) };
+    $('#paForm').reset(); showErr('#paError');
+    $('#paTitle').textContent = resetOnly ? 'Reset password for ' + a.name : a ? 'Edit client login' : 'Add client login';
+    $('#paSave').textContent = resetOnly ? 'Reset password' : a ? 'Save changes' : 'Add client login';
+    for (const id of ['#paName', '#paLogin', '#paEmail', '#paPhone']) $(id).closest('.row2').hidden = !!resetOnly;
+    $('#paSearch').closest('.field').hidden = !!resetOnly;
+    $('#paPassWrap').hidden = !!a && !resetOnly; $('#paPass').required = !a || !!resetOnly;
+    $('#paHelp').textContent = resetOnly ? 'Give the client this temporary password privately. They will choose their own at next sign-in, and are signed out everywhere now.' : 'They\'ll be asked to choose their own password at first sign-in. They sign in on the same page as your staff.';
+    if (a) { $('#paName').value = a.name; $('#paLogin').value = a.username; $('#paEmail').value = a.email; $('#paPhone').value = a.phone; }
+    if (!a || resetOnly) $('#paPass').value = tempPassword();
+    if (!resetOnly) paRenderClients();
+    $('#paDlg').showModal(); (resetOnly ? $('#paPass') : $('#paName')).focus();
+  }
+  $('#newPortalBtn').onclick = () => openPortalAccount(null);
+  $('#paSearch').addEventListener('input', () => paRenderClients());
+  $('#paForm').addEventListener('submit', async e => {
+    e.preventDefault(); showErr('#paError'); const { a, resetOnly, picked } = paEditing; const b = $('#paSave'); b.disabled = true;
+    try {
+      let body;
+      if (resetOnly) body = { password: $('#paPass').value };
+      else {
+        if (!picked.size && !(a && a.clientIds.some(id => !clientById(id)))) throw new Error('Tick at least one company.');
+        body = { name: $('#paName').value.trim(), username: $('#paLogin').value.trim(), email: $('#paEmail').value.trim(), phone: $('#paPhone').value.trim(), clientIds: [...picked] };
+        if (!a) body.password = $('#paPass').value;
+      }
+      const r = a ? await api('PATCH', '/api/portal-accounts/' + a.id, body) : await api('POST', '/api/portal-accounts', body);
+      state.portalAccounts = a ? state.portalAccounts.map(x => x.id === r.account.id ? r.account : x) : [...state.portalAccounts, r.account].sort((x, y) => x.name.localeCompare(y.name));
+      $('#paDlg').close(); renderPortalAdmin();
+      toast(resetOnly ? 'Password reset. Share it privately.' : a ? 'Client login saved' : `Client login added. Login ID: ${r.account.username}`);
+    } catch (err) { showErr('#paError', err.message); }
+    finally { b.disabled = false; }
   });
 
   document.querySelectorAll('dialog [data-close]').forEach(b => b.onclick = () => b.closest('dialog').close());

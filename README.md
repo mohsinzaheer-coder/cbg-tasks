@@ -76,6 +76,18 @@ Someone can only be removed from an international client once their open and rec
 The **Tasks** page has two dashboards, **Local** and **International**, each with its own counts, filters and table.
 Each staff member has a **Works on** setting (Local, International, or Both) on the People page. It decides which dashboard they see, which kind of client tasks they can be given, and whether they can be given access to international clients.
 
+## Client portal
+
+On the **Client portal** tab, the owner and partners can give a client their own login. One login can cover several companies, so a client with two or three companies sees all of them on one dashboard.
+Clients sign in on the same page as staff. They see, for each company: its registration details, the partner in charge, and every task for it from the last 12 months with category, due date, status, completed date and the **Update for the client**.
+To write that update, open a task's **Note** and fill in **Update for the client**. The other note stays internal.
+Clients never see portal passwords, internal instructions, progress notes, who is working on a task, other companies, or anything else in the app. Client logins can't open any staff page.
+Deactivate or reset a client's password there too; both sign them out straight away. Login IDs must be different from staff login IDs.
+
+## Recurring tasks grouped by category
+
+On the Tasks board (table view), recurring tasks are gathered under their category, e.g. **SECP / Corporate** or **Sales Tax**. Each category is one row showing how many are Pending, In progress and Done, a progress bar, and any overdue. Click the row to open the tasks in it, or click **Pending**, **In progress** or **Done** to open just those. Untick **Group recurring by category** to see every task in one list again.
+
 ## Sorting and filtering task tables
 
 In table view (Tasks and My feed), click any column heading to sort by it: once for A→Z or earliest first, again to reverse, a third time to go back to the normal order. The row under the headings has a filter for each column: type in Task, Client / Project, Category, Assigned to or Partners, or pick a Priority, Due (Overdue, Due today, Next 7 days, This month, No due date) or Status. **Clear** next to the status tabs resets them.
