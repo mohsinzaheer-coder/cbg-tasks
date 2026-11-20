@@ -392,8 +392,9 @@
     </div>
     <div class="field" id="rPartnersWrap"><span class="flabel">Partners involved</span><div class="checks" id="rPartners"></div></div>
     <div class="row3">
-      <label for="rFreq">Repeats<select id="rFreq"><option value="monthly">Monthly</option><option value="quarterly">Quarterly</option><option value="annual">Yearly</option></select></label>
-      <label for="rDay">Due on day<input id="rDay" type="number" min="1" max="31" value="15" required></label>
+      <label for="rFreq">Repeats<select id="rFreq"><option value="weekly">Weekly</option><option value="monthly" selected>Monthly</option><option value="quarterly">Quarterly</option><option value="annual">Yearly</option></select></label>
+      <label for="rDay" id="rDayWrap">Due on day<input id="rDay" type="number" min="1" max="31" value="15" required></label>
+      <label for="rWday" id="rWdayWrap" hidden>Due every<select id="rWday"><option value="1">Monday</option><option value="2">Tuesday</option><option value="3">Wednesday</option><option value="4">Thursday</option><option value="5" selected>Friday</option><option value="6">Saturday</option><option value="7">Sunday</option></select></label>
       <label for="rMonth" id="rMonthWrap">Due in month<select id="rMonth"></select></label>
     </div>
     <div class="field" id="rMonthsWrap"><span class="flabel">Due in these months</span><div class="checks months" id="rMonths"></div></div>

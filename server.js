@@ -118,7 +118,7 @@ CREATE TABLE IF NOT EXISTS recurring (
   category_id INTEGER REFERENCES categories(id) ON DELETE SET NULL,
   client_id   INTEGER REFERENCES clients(id) ON DELETE SET NULL,
   assignee_id INTEGER NOT NULL REFERENCES users(id),
-  frequency   TEXT NOT NULL CHECK (frequency IN ('monthly','quarterly','annual')),
+  frequency   TEXT NOT NULL CHECK (frequency IN ('weekly','monthly','quarterly','annual')),
   due_day     INTEGER NOT NULL,
   due_month   INTEGER,
   months      TEXT NOT NULL DEFAULT '',
@@ -211,6 +211,28 @@ CREATE TABLE IF NOT EXISTS recurring (
   if (!cols.includes('created_by')) db.exec('ALTER TABLE clients ADD COLUMN created_by INTEGER');
   const rc = db.prepare('PRAGMA table_info(recurring)').all().map(c => c.name);
   if (!rc.includes('assignee_ids')) { db.exec("ALTER TABLE recurring ADD COLUMN assignee_ids TEXT NOT NULL DEFAULT ''"); db.exec('UPDATE recurring SET assignee_ids = CAST(assignee_id AS TEXT)'); }
+}
+// Version 2.23: weekly recurring tasks. Rebuild recurring with the wider frequency rule, keeping every column, row and id.
+{
+  const sql = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'recurring'").get().sql;
+  if (!sql.includes("'weekly'")) {
+    const newSql = sql.replace(/CHECK\s*\(\s*frequency\s+IN\s*\(\s*'monthly'\s*,\s*'quarterly'\s*,\s*'annual'\s*\)\s*\)/, "CHECK (frequency IN ('weekly','monthly','quarterly','annual'))")
+      .replace(/^CREATE TABLE\s+"?recurring"?/, 'CREATE TABLE recurring_new');
+    if (newSql === sql || !newSql.includes("'weekly'") || !newSql.startsWith('CREATE TABLE recurring_new')) throw new Error('Could not upgrade the recurring table for weekly tasks.');
+    const cols = db.prepare('PRAGMA table_info(recurring)').all().map(c => c.name).join(',');
+    const before = db.prepare('SELECT COUNT(*) n FROM recurring').get().n;
+    db.exec('PRAGMA foreign_keys = OFF'); db.exec('BEGIN');
+    try {
+      db.exec(newSql);
+      db.exec(`INSERT INTO recurring_new (${cols}) SELECT ${cols} FROM recurring`);
+      if (db.prepare('SELECT COUNT(*) n FROM recurring_new').get().n !== before) throw new Error('Row count changed while upgrading recurring tasks.');
+      db.exec('DROP TABLE recurring');
+      db.exec('ALTER TABLE recurring_new RENAME TO recurring');
+      db.exec('COMMIT');
+    } catch (e) { db.exec('ROLLBACK'); throw e; }
+    finally { db.exec('PRAGMA foreign_keys = ON'); }
+    console.log('Database upgraded: weekly recurring tasks allowed.');
+  }
 }
 // Version 2.10: staff work on local clients, international clients, or both
 if (!db.prepare('PRAGMA table_info(users)').all().some(c => c.name === 'work_area')) {
@@ -1180,7 +1202,15 @@ route('DELETE', '/api/tasks/:id', true, async (req, res, body, me, params) => {
 
 /* ---- recurring tasks ---- */
 // Every due date for a rule from `fromYmd` (exclusive) to `toYmd` (inclusive)
+const WEEKDAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+const isoDow = ymd => { const d = new Date(ymd + 'T00:00:00Z').getUTCDay(); return d === 0 ? 7 : d; }; // 1 = Monday … 7 = Sunday
 function dueDates(r, fromYmd, toYmd) {
+  if (r.frequency === 'weekly') { // due_day holds the weekday, 1 = Monday … 7 = Sunday
+    const out = []; let d = addDays(fromYmd, 1);
+    d = addDays(d, (r.due_day - isoDow(d) + 7) % 7);
+    for (; d <= toYmd; d = addDays(d, 7)) out.push({ due: d, period: 'D' + d, label: `${Number(d.slice(8))} ${MON[Number(d.slice(5, 7)) - 1]} ${d.slice(0, 4)}` });
+    return out;
+  }
   const out = []; const months = r.months ? r.months.split(',').map(Number) : [];
   let y = Number(fromYmd.slice(0, 4)), m = Number(fromYmd.slice(5, 7));
   const endY = Number(toYmd.slice(0, 4)), endM = Number(toYmd.slice(5, 7));
@@ -1272,8 +1302,9 @@ function ruleFields(body, me, cur) {
     const ids = readAssignees(body).map(id => cur0.includes(id) ? id : checkAssignee(me, id).id);
     f.assignee_id = ids[0]; f.assignee_ids = ids.join(',');
   }
-  if ('frequency' in body) { if (!['monthly', 'quarterly', 'annual'].includes(body.frequency)) throw bad('Choose how often it repeats.'); f.frequency = body.frequency; }
+  if ('frequency' in body) { if (!['weekly', 'monthly', 'quarterly', 'annual'].includes(body.frequency)) throw bad('Choose how often it repeats.'); f.frequency = body.frequency; }
   if ('dueDay' in body) { const d = Number(body.dueDay); if (!Number.isInteger(d) || d < 1 || d > 31) throw bad('Due day must be between 1 and 31.'); f.due_day = d; }
+  if ((f.frequency ?? cur?.frequency) === 'weekly' && !((f.due_day ?? cur?.due_day) >= 1 && (f.due_day ?? cur?.due_day) <= 7)) throw bad('Choose the day of the week it is due.');
   if ('dueMonth' in body) { const d = intOrNull(body.dueMonth); if (d !== null && (!Number.isInteger(d) || d < 1 || d > 12)) throw bad('Choose the due month.'); f.due_month = d; }
   if ('months' in body) {
     if (!Array.isArray(body.months)) throw bad('Choose the months.');
@@ -1336,13 +1367,17 @@ route('POST', '/api/recurring/import', true, async (req, res, body, me) => {
     const errors = [], notes = []; const line = Number(row.line) || i + 1;
     let title = String(row.title ?? '').replace(/\s+/g, ' ').trim().slice(0, 120);
     const freqRaw = norm(row.repeat);
-    const frequency = /^(year|annual)/.test(freqRaw) ? 'annual' : /^month/.test(freqRaw) ? 'monthly' : /^quarter/.test(freqRaw) ? 'quarterly' : null;
+    const frequency = /^(year|annual)/.test(freqRaw) ? 'annual' : /^month/.test(freqRaw) ? 'monthly' : /^quarter/.test(freqRaw) ? 'quarterly' : /^week/.test(freqRaw) ? 'weekly' : null;
     if (frequency === 'annual' && /\s(19|20)\d{2}$/.test(title)) { title = title.replace(/\s+(19|20)\d{2}$/, ''); notes.push('Year taken out of the name; each year\'s task shows its own year'); }
     if (!title) errors.push('Task name is empty');
     const clientName = String(row.client ?? '').replace(/\s+/g, ' ').trim().slice(0, 120);
     if (!clientName) errors.push('Client name is empty');
-    if (!frequency) errors.push(`Repeat must be Monthly, Quarterly or Yearly (found "${row.repeat ?? ''}")`);
-    const dueDay = Number(row.dueDay); if (!Number.isInteger(dueDay) || dueDay < 1 || dueDay > 31) errors.push('Due on day must be 1–31');
+    if (!frequency) errors.push(`Repeat must be Weekly, Monthly, Quarterly or Yearly (found "${row.repeat ?? ''}")`);
+    let dueDay = Number(row.dueDay);
+    if (frequency === 'weekly') { // a weekday name (Friday, Fri) or 1–7 with 1 = Monday
+      const w = String(row.dueDay ?? '').trim().toLowerCase(); const i = WEEKDAYS.findIndex(n => w.length >= 3 && n.toLowerCase().startsWith(w));
+      dueDay = i >= 0 ? i + 1 : dueDay; if (!Number.isInteger(dueDay) || dueDay < 1 || dueDay > 7) errors.push('For weekly tasks, Due on Day must be a weekday such as Friday');
+    } else if (!Number.isInteger(dueDay) || dueDay < 1 || dueDay > 31) errors.push('Due on day must be 1–31');
     let dueMonth = null, months = '';
     if (frequency === 'annual') { dueMonth = monthOf(row.dueMonth); if (!dueMonth) errors.push('Due in month is missing or not a month'); }
     if (frequency === 'quarterly') {

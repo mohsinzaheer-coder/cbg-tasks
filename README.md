@@ -111,7 +111,7 @@ Only the owner, or the partner who assigned the task, can move it back to To do 
 
 ## Importing recurring tasks from Excel
 
-On **Recurring**, the owner can use **Import from Excel** (.xlsx or .csv). Columns: Task Name, Client Name, Assign To, Partner, Category, Repeat (Monthly / Quarterly / Yearly), Due on Day, Due In Month, Add to board this many days before due. Optional: Authorized Capital, Paid up Capital, Priority, Instructions.
+On **Recurring**, the owner can use **Import from Excel** (.xlsx or .csv). Columns: Task Name, Client Name, Assign To, Partner, Category, Repeat (Weekly / Monthly / Quarterly / Yearly), Due on Day (for Weekly, a weekday such as Friday), Due In Month, Add to board this many days before due. Optional: Authorized Capital, Paid up Capital, Priority, Instructions.
 Several people go in one cell separated by commas, and names must match the People page. The import shows a preview first. Rows with a problem are listed and left out. Missing clients and categories are created, and importing the same file again skips what is already set up.
 
 ## Importing clients and portal logins
@@ -137,7 +137,7 @@ Client logins for FBR, PRA, SRB, KPRA, BRA and SECP are stored **encrypted**. Th
 
 ## Recurring tasks
 
-Set up returns once (monthly, quarterly or yearly) and the app adds each one to the task board a chosen number of days before it's due, titled with the client and the period, e.g. *Sales Tax Return — ABC Ltd — Oct 2026*. The quick-start buttons fill typical due days; change the day whenever a deadline is extended or moved by notification.
+Set up returns once (weekly, monthly, quarterly or yearly) and the app adds each one to the task board a chosen number of days before it's due, titled with the client and the period, e.g. *Sales Tax Return — ABC Ltd — Oct 2026*. For **Weekly**, choose the day of the week (e.g. every Friday); each week's task is named with its date, e.g. *Stock Report — ABC Ltd — 27 Nov 2026*. The quick-start buttons fill typical due days; change the day whenever a deadline is extended or moved by notification.
 
 ## Settings
 

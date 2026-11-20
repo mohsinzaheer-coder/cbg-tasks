@@ -1173,8 +1173,10 @@
   };
 
   /* ---------- recurring ---------- */
+  const WEEKDAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
   function schedule(r) {
     const d = n => n + (n % 10 === 1 && n !== 11 ? 'st' : n % 10 === 2 && n !== 12 ? 'nd' : n % 10 === 3 && n !== 13 ? 'rd' : 'th');
+    if (r.frequency === 'weekly') return `Weekly · every ${WEEKDAYS[(r.dueDay || 5) - 1]}`;
     if (r.frequency === 'monthly') return `Monthly · due ${d(r.dueDay)}`;
     if (r.frequency === 'quarterly') return `Quarterly · due ${d(r.dueDay)} of ${r.months.map(m => MONTHS[m - 1].slice(0, 3)).join(', ')}`;
     return `Yearly · due ${r.dueDay} ${MONTHS[(r.dueMonth || 1) - 1]}`;
@@ -1220,13 +1222,17 @@
   }
   let editRule = null;
   function syncFreq() {
-    const f = $('#rFreq').value;
+    const f = $('#rFreq').value, wk = f === 'weekly';
     $('#rMonthWrap').hidden = f !== 'annual'; $('#rMonthsWrap').hidden = f !== 'quarterly';
+    $('#rDayWrap').hidden = wk; $('#rWdayWrap').hidden = !wk; $('#rDay').required = !wk;
+    // a week ahead or more would put two weeks on the board at once
+    if (wk && Number($('#rLead').value) > 6) $('#rLead').value = 2;
     preview();
   }
   function preview() {
     const f = $('#rFreq').value, day = Number($('#rDay').value) || 1, leadD = Number($('#rLead').value) || 0;
     let txt = '';
+    if (f === 'weekly') { const wd = WEEKDAYS[Number($('#rWday').value) - 1]; txt = `Due every ${wd}. Each week's task is named with its date, e.g. “… — 27 Nov 2026”.`; }
     if (f === 'monthly') txt = `Due on day ${day} every month. Covers the previous month (e.g. due ${day} Nov → return for October).`;
     if (f === 'quarterly') { const ms = [...document.querySelectorAll('#rMonths input:checked')].map(i => MONTHS[Number(i.value) - 1].slice(0, 3)); txt = `Due on day ${day} of ${ms.join(', ') || '(choose months)'}. Covers the quarter that just ended.`; }
     if (f === 'annual') txt = `Due ${day} ${MONTHS[Number($('#rMonth').value) - 1]} each year, labelled with the tax year.`;
@@ -1247,7 +1253,7 @@
     pre.hidden = !!r;
     if (r) {
       $('#rTitle').value = r.title; $('#rCat').value = r.categoryId ?? ''; $('#rClient').value = r.clientId ?? '';
-      $('#rFreq').value = r.frequency; $('#rDay').value = r.dueDay; $('#rMonth').value = r.dueMonth || 1; $('#rLead').value = r.leadDays; $('#rPri').value = r.priority; $('#rNotes').value = r.notes;
+      $('#rFreq').value = r.frequency; $('#rDay').value = r.frequency === 'weekly' ? 15 : r.dueDay; if (r.frequency === 'weekly') $('#rWday').value = r.dueDay; $('#rMonth').value = r.dueMonth || 1; $('#rLead').value = r.leadDays; $('#rPri').value = r.priority; $('#rNotes').value = r.notes;
       r.months.forEach(m => { const c = $('#rm-' + m); if (c) c.checked = true; });
     } else { $('#rPri').value = 'high'; [1, 4, 7, 10].forEach(m => $('#rm-' + m).checked = true); }
     // title already set above for the right view
@@ -1262,12 +1268,12 @@
   }
   ['#rFreq'].forEach(s => $(s).addEventListener('change', syncFreq));
   ['#rDay', '#rLead'].forEach(s => $(s).addEventListener('input', preview));
-  $('#rMonth').addEventListener('change', preview);
+  $('#rMonth').addEventListener('change', preview); $('#rWday').addEventListener('change', preview);
   $('#newRuleBtn').onclick = () => openRule(null);
   $('#ruleForm').addEventListener('submit', async e => {
     e.preventDefault(); showErr('#ruleError');
     const body = { title: $('#rTitle').value.trim(), categoryId: $('#rCat').value ? Number($('#rCat').value) : null, clientId: $('#rClient').value ? Number($('#rClient').value) : null,
-      assigneeIds: getWho('r'), frequency: $('#rFreq').value, dueDay: Number($('#rDay').value), dueMonth: Number($('#rMonth').value),
+      assigneeIds: getWho('r'), frequency: $('#rFreq').value, dueDay: Number($('#rFreq').value === 'weekly' ? $('#rWday').value : $('#rDay').value), dueMonth: Number($('#rMonth').value),
       partnerIds: checkedIds($('#rPartners')), months: [...document.querySelectorAll('#rMonths input:checked')].map(i => Number(i.value)), leadDays: Number($('#rLead').value), priority: $('#rPri').value, notes: $('#rNotes').value.trim() };
     if (!body.assigneeIds.length) return showErr('#ruleError', 'Tick at least one person under Assign to.');
     const b = $('#ruleSave'); b.disabled = true;
