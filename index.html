@@ -200,6 +200,10 @@
   </section>
   <div class="page stack-lg pv-page">
     <div class="pv-stats" id="pvStats"></div>
+    <section class="pv-need" id="pvNeed" hidden aria-labelledby="pvNeedH">
+      <div class="pv-need-h"><span class="pv-need-ic" aria-hidden="true">!</span><div><h2 id="pvNeedH">Pending from your side</h2><p>We need these to finish your work. When you've sent an item, tap <b>Mark as sent</b> so our team knows to look for it.</p></div></div>
+      <div id="pvNeedList" class="pv-need-list"></div>
+    </section>
     <div class="pv-grid">
       <div class="stack-lg pv-main">
         <div class="pv-pick" id="pvPick" role="tablist" aria-label="Companies"></div>
@@ -214,6 +218,28 @@
   </div>
   <footer class="pv-foot"><img src="/logo-mark.png" alt="" width="22" height="22"><span>Corporate Brilliance Global</span><em>Envision · Execute · Elevate</em></footer>
 </div>
+
+<!-- Hold a task while waiting for the client -->
+<dialog id="holdDlg" class="wide-dlg">
+  <form id="holdForm" class="stack" method="dialog" autocomplete="off">
+    <h2>Waiting for the client</h2>
+    <p class="help" id="holdFor"></p>
+    <div class="field"><span class="flabel">What's needed from the client <em class="req">(one item per line)</em></span>
+      <div id="holdItems" class="hold-items"></div>
+      <button type="button" class="link" id="holdAdd">+ Add another item</button>
+    </div>
+    <label for="holdNote">Message to the client <span class="help-inline">(optional, shown on their portal)</span><textarea id="holdNote" maxlength="1000" rows="2" placeholder="e.g. We can't file the return until these reach us."></textarea></label>
+    <p class="help">The client sees this list under <b>Pending from your side</b> on their portal and can mark each item as sent. Tick items as they reach you. When all are received, the hold ends by itself.</p>
+    <p class="form-error" id="holdError" role="alert" hidden></p>
+    <div class="dlg-actions hold-actions">
+      <button type="button" class="ghost" id="holdCopy">Copy reminder message</button>
+      <button type="button" class="ghost danger" id="holdRelease" hidden>End hold</button>
+      <span class="spacer"></span>
+      <button type="button" class="ghost" data-close>Cancel</button>
+      <button class="primary" type="submit" id="holdSave">Put on hold</button>
+    </div>
+  </form>
+</dialog>
 
 <!-- Client portal login dialog -->
 <dialog id="paDlg" class="wide-dlg">

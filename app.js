@@ -219,9 +219,10 @@
   let viewMode = 'table';
   try { viewMode = localStorage.getItem('cbg-view') || 'table'; } catch { }
   const statusTab = {};
-  const STATUS_LABEL = { ...Object.fromEntries(STATUS), open: 'Open', overdue: 'Overdue', all: 'All' };
+  const STATUS_LABEL = { ...Object.fromEntries(STATUS), open: 'Open', overdue: 'Overdue', hold: 'Waiting for client', all: 'All' };
   // Which tasks a status key covers: the three statuses, plus 'open' (not done), 'overdue' and 'all'
-  const inStatus = (t, k) => k === 'all' ? true : k === 'open' ? t.status !== 'done' : k === 'overdue' ? isLate(t) : t.status === k;
+  const inStatus = (t, k) => k === 'all' ? true : k === 'open' ? t.status !== 'done' : k === 'overdue' ? isLate(t) : k === 'hold' ? onHold(t) : t.status === k;
+  const onHold = t => t.onHold && t.status !== 'done';
   function sortTasks(list, status) {
     const rank = { todo: 0, doing: 1, done: 2 };
     return list.slice().sort((a, b) =>
@@ -295,7 +296,7 @@
     const ncol = TCOLS.length + 1;
     for (const [name, all] of groups) {
       const key = host.id + '|' + name; const open = grpOpen.has(key);
-      const n = { todo: 0, doing: 0, done: 0, late: 0 }; for (const t of all) { n[t.status]++; if (isLate(t)) n.late++; }
+      const n = { todo: 0, doing: 0, done: 0, late: 0, hold: 0 }; for (const t of all) { n[t.status]++; if (isLate(t)) n.late++; if (onHold(t)) n.hold++; }
       const clients = new Set(all.map(t => t.clientId).filter(Boolean)).size;
       const tr = el('tr', 'grp-row' + (open ? ' open' : '')); const td = el('td'); td.colSpan = ncol;
       const head = el('div', 'grp-head');
@@ -310,6 +311,7 @@
         const c = btn('', 'grp-chip g-' + k + (open && sel === k ? ' on' : ''), () => { grpTab[key] = sel === k && open ? 'all' : k; grpOpen.add(key); renderBoards(); });
         c.append(el('b', null, String(n[k])), document.createTextNode(' ' + l)); c.disabled = !n[k]; chips.append(c);
       }
+      if (n.hold) chips.append(el('span', 'grp-chip g-hold', `${n.hold} waiting for client`));
       if (n.late) chips.append(el('span', 'grp-chip g-late', `${n.late} overdue`));
       head.append(tog, bar, chips); td.append(head); tr.append(td); tb.append(tr);
       if (!open) continue;
@@ -345,12 +347,13 @@
     }
     const cs = colsFor(host.id); const nFilters = Object.values(cs.f).filter(v => v && v.trim()).length;
     tasks = applyCols(host.id, tasks);
-    const counts = { todo: 0, doing: 0, done: 0, all: tasks.length };
-    for (const t of tasks) counts[t.status]++;
+    const counts = { todo: 0, doing: 0, done: 0, hold: 0, all: tasks.length };
+    for (const t of tasks) { counts[t.status]++; if (onHold(t)) counts.hold++; }
     const bar = el('div', 'tt-bar');
     const tabs = el('div', 'status-tabs'); tabs.setAttribute('role', 'tablist');
-    for (const [key, label] of [...STATUS, ['all', 'All']]) {
-      const b = btn(label + ' ', 'st-tab' + (cur === key ? ' on' : '') + (key === 'done' ? ' is-done' : ''), () => { statusTab[host.id] = key; renderBoards(); });
+    for (const [key, label] of [...STATUS.slice(0, 2), ['hold', 'Waiting for client'], STATUS[2], ['all', 'All']]) {
+      if (key === 'hold' && !counts.hold && cur !== 'hold') continue;
+      const b = btn(label + ' ', 'st-tab' + (cur === key ? ' on' : '') + (key === 'done' ? ' is-done' : '') + (key === 'hold' ? ' is-hold' : ''), () => { statusTab[host.id] = key; renderBoards(); });
       b.setAttribute('role', 'tab'); b.setAttribute('aria-selected', cur === key);
       b.append(el('span', 'st-count', String(counts[key]))); tabs.append(b);
     }
@@ -361,7 +364,7 @@
       note.append(btn('Clear', 'link', () => { colState[host.id] = { sort: null, f: {} }; renderBoards(); })); bar.append(note);
     }
     bar.append(groupToggle(), viewToggle()); host.append(bar);
-    if (cur === 'open' || cur === 'overdue') {
+    if (cur === 'open' || cur === 'overdue' || (cur === 'hold' && !counts.hold)) {
       const note = el('span', 'filter-note'); note.append(document.createTextNode('Showing ' + STATUS_LABEL[cur].toLowerCase() + ' tasks '));
       note.append(btn('Show all', 'link', () => { statusTab[host.id] = 'all'; renderBoards(); })); bar.insertBefore(note, bar.lastChild);
     }
@@ -373,7 +376,7 @@
       groups = [...m].filter(([, a]) => a.some(t => inStatus(t, cur))).sort((a, b) => a[0].localeCompare(b[0]));
       tasks = tasks.filter(t => !t.recurringId);
     }
-    let list = sortByCol(host.id, sortTasks(tasks.filter(t => inStatus(t, cur)), cur === 'open' || cur === 'overdue' ? 'all' : cur));
+    let list = sortByCol(host.id, sortTasks(tasks.filter(t => inStatus(t, cur)), ['open', 'overdue', 'hold'].includes(cur) ? 'all' : cur));
     const total = list.length;
     if (cur === 'done' || cur === 'all') list = list.slice(0, 200);
     if (!list.length && !groups.length && !nFilters) { host.append(el('div', 'lane-empty', !tasks.length && emptyText ? emptyText : `No ${cur === 'all' ? '' : STATUS_LABEL[cur].toLowerCase() + ' '}tasks here.`)); return; }
@@ -424,6 +427,7 @@
     if (t.notes) td.append(el('small', 'tt-notes', t.notes));
     if (t.progress) { const p = el('small', 'tt-progress'); p.append(el('b', null, 'Progress: '), document.createTextNode(t.progress)); td.append(p); }
     if (t.clientNote) { const p = el('small', 'tt-client-note'); p.append(el('b', null, 'Client sees: '), document.createTextNode(t.clientNote)); td.append(p); }
+    if (onHold(t)) td.append(holdBadge(t, mine || t.canEdit));
     tr.append(td);
     const ctd = el('td', null, t.visibility === 'personal' ? (t.projectName || '—') : (t.clientName || '—'));
     if (clientById(t.clientId)?.scope === 'intl') { ctd.append(document.createTextNode(' ')); ctd.append(el('span', 'chip intl', 'Intl')); }
@@ -460,6 +464,7 @@
       ac.append(el('span', null, 'Delete? '), btn('Delete', 'ghost danger', () => delTask(t)), btn('Keep', 'ghost', () => { state.confirm = null; renderBoards(); }));
     } else {
       if (mine || t.canEdit) ac.append(btn(t.progress || t.clientNote ? 'Note' : 'Add note', 'ghost', () => openNote(t)));
+      if ((mine || t.canEdit) && canHold(t) && !onHold(t)) ac.append(btn('Hold for client', 'ghost', () => openHold(t)));
       if (t.clientId && clientById(t.clientId)) ac.append(btn('Logins', 'ghost', () => { state.clientId = t.clientId; setTab(clientById(t.clientId)?.scope === 'intl' ? 'intl' : 'clients'); render(); }));
       if (t.canEdit) ac.append(btn('Edit', 'ghost', () => openTask(t)));
       if (t.canDelete) ac.append(btn('Delete', 'ghost danger', () => { state.confirm = key; renderBoards(); }));
@@ -523,6 +528,7 @@
     if (t.createdBy !== me.id && !t.recurringId) m.append(el('span', null, 'From ' + t.createdByName));
     c.append(m);
     if (t.status !== 'done' && t.lastReopen) c.append(reopenNote(t.lastReopen));
+    if (onHold(t)) c.append(holdBadge(t, mine || t.canEdit));
     if (!(mine || t.canEdit)) return c;
     const a = el('div', 'actions'); const key = 'task:' + t.id;
     if (state.confirm === key) {
@@ -532,11 +538,90 @@
     if (t.status === 'done') { if (t.canReopen) a.append(btn('Change status…', 'ghost', () => openReopen(t, 'todo'))); else a.append(el('span', 'locked-note', '🔒 Done — locked')); }
     else for (const [k] of STATUS) if (k !== t.status) a.append(btn(k === 'done' ? 'Mark done' : k === 'doing' ? 'Start' : 'Back to To do', 'ghost', () => patchTask(t, { status: k })));
     a.append(btn(t.progress ? 'Edit note' : 'Add note', 'ghost', () => openNote(t)));
+    if (canHold(t) && !onHold(t)) a.append(btn('Hold for client', 'ghost', () => openHold(t)));
     if (t.clientId && clientById(t.clientId)) a.append(btn('Client logins', 'ghost', () => { state.clientId = t.clientId; setTab(clientById(t.clientId)?.scope === 'intl' ? 'intl' : 'clients'); render(); }));
     if (t.canEdit) a.append(btn('Edit', 'ghost', () => openTask(t)));
     if (t.canDelete) a.append(btn('Delete', 'ghost danger', () => { state.confirm = key; renderBoards(); }));
     c.append(a); return c;
   }
+  /* ---------- hold: waiting for the client ---------- */
+  const canHold = t => t.visibility !== 'personal' && !!t.clientId && t.status !== 'done';
+  function holdBadge(t, canAct) {
+    const rq = t.requests || [], left = rq.filter(r => !r.receivedAt), sent = left.filter(r => r.clientSentAt);
+    const b = el(canAct ? 'button' : 'div', 'hold-badge'); if (canAct) { b.type = 'button'; b.onclick = () => openHold(t); b.title = 'Open the list of items needed from the client'; }
+    const top = el('span', 'hold-top'); top.append(el('span', 'pause-ic'), el('b', null, 'Waiting for client'), document.createTextNode(` · ${left.length} of ${rq.length} pending`));
+    b.append(top);
+    if (sent.length) b.append(el('span', 'hold-sent', `Client says ${sent.length} sent: please check`));
+    const days = t.holdSince ? Math.floor((Date.now() - t.holdSince) / 864e5) : 0;
+    b.append(el('span', 'hold-since', t.holdSince ? `On hold since ${fmtDate(new Date(t.holdSince).toLocaleDateString('en-CA', { timeZone: 'Asia/Karachi' }))}${days ? ` (${days} day${days === 1 ? '' : 's'})` : ''}` : ''));
+    return b;
+  }
+  let holdTask = null;
+  function holdRow(item) {
+    const r = el('div', 'hold-row' + (item.receivedAt ? ' got' : ''));
+    if (item.id) {
+      const cb = el('input'); cb.type = 'checkbox'; cb.checked = !!item.receivedAt; cb.title = 'Received'; cb.setAttribute('aria-label', 'Received: ' + item.text);
+      cb.onchange = () => markReceived(item, cb.checked, cb); r.append(cb);
+    } else r.append(el('span', 'hold-dot'));
+    const i = el('input'); i.value = item.text || ''; i.maxLength = 300; i.placeholder = 'e.g. Bank statement for October 2026'; i.dataset.id = item.id || '';
+    i.setAttribute('aria-label', 'Item needed from the client'); r.append(i);
+    const st = el('small', 'hold-st');
+    if (item.receivedAt) st.textContent = 'Received' + (item.receivedByName ? ' by ' + item.receivedByName : '') + ' · ' + fmtStamp(item.receivedAt);
+    else if (item.clientSentAt) { st.textContent = 'Client says sent · ' + fmtStamp(item.clientSentAt); st.classList.add('sent'); }
+    r.append(st);
+    r.append(btn('✕', 'ghost hold-x', () => { r.remove(); if (!$('#holdItems').children.length) $('#holdItems').append(holdRow({})); }));
+    r.lastChild.setAttribute('aria-label', 'Remove item');
+    return r;
+  }
+  function openHold(t) {
+    holdTask = t; $('#holdForm').reset(); showErr('#holdError');
+    $('#holdFor').textContent = `${t.title}${t.clientName ? ' · ' + t.clientName : ''}`;
+    const box = $('#holdItems'); box.replaceChildren();
+    for (const r of (onHold(t) ? t.requests : [])) box.append(holdRow(r));
+    if (!box.children.length) box.append(holdRow({}), holdRow({}));
+    $('#holdNote').value = onHold(t) ? t.holdNote : '';
+    $('#holdRelease').hidden = !onHold(t); $('#holdSave').textContent = onHold(t) ? 'Save list' : 'Put on hold';
+    $('#holdDlg').showModal(); box.querySelector('input:not([type=checkbox])').focus();
+  }
+  function holdItemsFromForm() { return [...$('#holdItems').querySelectorAll('input:not([type=checkbox])')].map(i => ({ id: i.dataset.id ? Number(i.dataset.id) : null, text: i.value.trim() })).filter(i => i.text); }
+  function putTask(task) { state.tasks = state.tasks.map(x => x.id === task.id ? task : x); holdTask = task; renderBoards(); }
+  async function markReceived(item, got, cb) {
+    try {
+      const r = await api('POST', `/api/tasks/${holdTask.id}/requests/${item.id}/received`, { received: got }); putTask(r.task);
+      if (r.released) { $('#holdDlg').close(); toast('Everything received. The task is no longer on hold.'); return; }
+      const row = cb.closest('.hold-row'); const fresh = r.task.requests.find(x => x.id === item.id); if (fresh) row.replaceWith(holdRow(fresh));
+    } catch (err) { cb.checked = !got; showErr('#holdError', err.message); }
+  }
+  $('#holdAdd').onclick = () => { const r = holdRow({}); $('#holdItems').append(r); r.querySelector('input').focus(); };
+  $('#holdItems').addEventListener('keydown', e => {
+    if (e.key === 'Enter' && e.target.matches('input:not([type=checkbox])')) { e.preventDefault(); const r = holdRow({}); e.target.closest('.hold-row').after(r); r.querySelector('input').focus(); }
+  });
+  $('#holdForm').addEventListener('submit', async e => {
+    e.preventDefault(); const items = holdItemsFromForm();
+    if (!items.length) { showErr('#holdError', 'Add at least one thing needed from the client.'); return; }
+    const b = $('#holdSave'); b.disabled = true; showErr('#holdError');
+    try {
+      const wasOn = onHold(holdTask);
+      const r = await api('PUT', `/api/tasks/${holdTask.id}/hold`, { items, note: $('#holdNote').value.trim() }); putTask(r.task); $('#holdDlg').close();
+      toast(wasOn ? 'List saved' : 'On hold. The client can see what is pending on their portal.');
+    } catch (err) { showErr('#holdError', err.message); }
+    finally { b.disabled = false; }
+  });
+  $('#holdRelease').onclick = async () => {
+    try { const r = await api('POST', `/api/tasks/${holdTask.id}/hold/release`); putTask(r.task); $('#holdDlg').close(); toast('Hold ended'); }
+    catch (err) { showErr('#holdError', err.message); }
+  };
+  // A ready-made reminder to paste into WhatsApp or email
+  $('#holdCopy').onclick = async () => {
+    const t = holdTask; const items = holdItemsFromForm().filter(i => !(t.requests || []).some(r => r.id === i.id && r.receivedAt));
+    if (!items.length) { showErr('#holdError', 'Add the items first.'); return; }
+    const c = clientById(t.clientId);
+    const msg = [`Dear ${c?.contactPerson || c?.name || 'Sir/Madam'},`, '', `For "${t.title}"${c ? ` (${c.name})` : ''}, we need the following from your side:`,
+      ...items.map((i, n) => `${n + 1}. ${i.text}`), ...($('#holdNote').value.trim() ? ['', $('#holdNote').value.trim()] : []), '',
+      'We will complete the work as soon as these reach us. You can also see this list on your CBG client portal.', '', 'Regards,', state.me.name, 'Corporate Brilliance Global'].join('\n');
+    try { await navigator.clipboard.writeText(msg); toast('Reminder copied. Paste it into WhatsApp or email.'); }
+    catch { const ta = el('textarea'); ta.value = msg; document.body.append(ta); ta.select(); try { document.execCommand('copy'); toast('Reminder copied'); } catch { showErr('#holdError', 'Could not copy. Select and copy the list yourself.'); } ta.remove(); }
+  };
   function reopenNote(r) {
     const n = el('small', 'reopen-note');
     n.append(el('b', null, `Reopened by ${r.byName}`), document.createTextNode(` · ${fmtStamp(r.at)}: ${r.reason}`));
@@ -1546,7 +1631,9 @@
     $('#pvHello').textContent = `${hr < 12 ? 'Good morning' : hr < 17 ? 'Good afternoon' : 'Good evening'}, ${pv.account.name}`;
     $('#pvDate').textContent = new Date().toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', timeZone: 'Asia/Karachi' });
     const open = all.filter(t => t.status !== 'done').length, soon = all.filter(t => t.status !== 'done' && t.due && t.due >= td && t.due <= lim).length;
-    $('#pvLead').textContent = `${cos.length} ${cos.length === 1 ? 'company' : 'companies'} · ${open} open ${open === 1 ? 'item' : 'items'} · ${soon} due in the next 30 days`;
+    const needN = all.filter(t => t.onHold).reduce((n, t) => n + t.requests.filter(r => !r.receivedAt).length, 0);
+    $('#pvLead').textContent = `${cos.length} ${cos.length === 1 ? 'company' : 'companies'} · ${open} open ${open === 1 ? 'item' : 'items'} · ${soon} due in the next 30 days` + (needN ? ` · ${needN} needed from you` : '');
+    renderNeed(all.filter(t => t.onHold && (pv.pick === 'all' || t.co.id === pv.pick)));
     const pctAll = all.length ? Math.round(all.filter(t => t.status === 'done').length / all.length * 100) : 0;
     $('#pvRing').style.setProperty('--p', pctAll); $('#pvPct').textContent = pctAll + '%'; $('#pvRing').setAttribute('aria-label', pctAll + '% of work completed');
     // stat cards
@@ -1596,6 +1683,32 @@
     ct.append(el('p', null, partners.length ? 'Questions about your work? Speak to your partner in charge:' : 'Questions about your work? Contact Corporate Brilliance Global.'));
     for (const n of partners) { const r = el('div', 'pv-person'); r.append(el('span', 'av', initials(n))); const tx = el('div'); tx.append(el('b', null, n), el('small', null, cos.filter(c => c.partnerName === n).map(c => c.name).join(', '))); r.append(tx); ct.append(r); }
   }
+  function renderNeed(list) {
+    const box = $('#pvNeed'), host = $('#pvNeedList'); host.replaceChildren(); box.hidden = !list.length; if (!list.length) return;
+    list.sort((a, b) => (a.holdSince || 0) - (b.holdSince || 0));
+    for (const t of list) {
+      const card = el('article', 'pv-need-card');
+      const h = el('div', 'pv-need-top'); h.append(el('span', 'pv-mono sm', coInitials(t.co.name)));
+      const tt = el('div'); tt.append(el('small', 'pv-feed-co', t.co.name), el('b', null, t.title)); h.append(tt);
+      if (t.holdSince) h.append(el('small', 'pv-need-since', 'Requested ' + fmtDate(doneYmd(t.holdSince))));
+      card.append(h);
+      if (t.holdNote) card.append(el('p', 'pv-need-note', t.holdNote));
+      const ul = el('ul', 'pv-need-items');
+      for (const r of t.requests) {
+        const li = el('li', r.receivedAt ? 'got' : r.sentAt ? 'sent' : '');
+        li.append(el('span', 'pv-need-mark', r.receivedAt ? '✓' : r.sentAt ? '↗' : ''), el('span', 'pv-need-txt', r.text));
+        if (r.receivedAt) li.append(el('span', 'pv-need-st', 'Received'));
+        else if (r.sentAt) { const w = el('span', 'pv-need-st'); w.append(document.createTextNode('Sent · waiting for us to confirm ')); w.append(btn('Undo', 'link', () => markSent(r, false))); li.append(w); }
+        else li.append(btn('Mark as sent', 'primary sm', () => markSent(r, true)));
+        ul.append(li);
+      }
+      card.append(ul); host.append(card);
+    }
+  }
+  async function markSent(r, sent) {
+    try { await api('POST', `/api/portal/requests/${r.id}/sent`, { sent }); toast(sent ? 'Thank you. Our team has been told it is on its way.' : 'Marked as not sent'); await refreshPortal(); }
+    catch (err) { toast(err.message); refreshPortal(); }
+  }
   function portalCompany(c) {
     const box = el('section', 'pv-co'); const tab = pv.tab[c.id] || 'open';
     const head = el('div', 'pv-co-head');
@@ -1627,7 +1740,7 @@
       const cell = (label, cls) => { const d = el('td', cls); d.dataset.label = label; tr.append(d); return d; };
       const a = cell('Work', 'pv-work'); a.append(el('b', null, t.title)); if (t.category) a.append(el('span', 'pv-cat', t.category));
       const du = cell('Due', 'nowrap'); du.append(document.createTextNode(t.due ? fmtDate(t.due) : '—')); if (dueHint(t)) du.append(el('small', 'pv-hint', dueHint(t)));
-      const st = cell('Status'); st.append(el('span', 'pv-st pv-st-' + t.status, PV_STATUS[t.status]));
+      const st = cell('Status'); st.append(t.onHold ? el('span', 'pv-st pv-st-hold', 'Waiting for you') : el('span', 'pv-st pv-st-' + t.status, PV_STATUS[t.status]));
       const cd = cell('Completed', 'nowrap'); cd.textContent = t.doneAt ? fmtDate(doneYmd(t.doneAt)) : '—'; if (!t.doneAt) cd.classList.add('pv-nil');
       const u = cell('Latest update', 'pv-upd');
       if (t.update) { const q = el('div', 'pv-quote'); q.append(el('p', null, t.update)); if (t.updateAt) q.append(el('time', null, fmtStamp(t.updateAt))); u.append(q); } else { u.textContent = '—'; u.classList.add('pv-nil'); }

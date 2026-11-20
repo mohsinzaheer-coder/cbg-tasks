@@ -519,3 +519,53 @@ button.stat.on{border-color:var(--gold);background:var(--gold-soft);box-shadow:i
 .tasks-table tr.grp-sep td{font-size:.72rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);background:var(--surface);padding:14px 12px 6px}
 @media (max-width:720px){.grp-bar{display:none}}
 .tasks-table tr.grp-child .repeat{display:none}
+
+/* hold: waiting for the client (staff side) */
+.hold-badge{all:unset;box-sizing:border-box;display:flex;flex-direction:column;gap:1px;margin-top:6px;padding:5px 9px;border-radius:7px;background:var(--high-soft);border-left:3px solid var(--high);font-size:.8rem;color:var(--text);max-width:300px}
+button.hold-badge{cursor:pointer}
+button.hold-badge:hover{filter:brightness(.97)}
+button.hold-badge:focus-visible{outline:2px solid var(--high);outline-offset:2px}
+.hold-top b{color:var(--high)}
+.hold-sent{font-weight:700;color:var(--good)}
+.hold-since{color:var(--muted);font-size:.76rem}
+.card .hold-badge{max-width:none}
+.st-tab.is-hold .st-count{background:var(--high-soft);color:var(--high)}
+.grp-chip.g-hold{background:var(--high-soft);color:var(--high);border-color:transparent;cursor:default}
+.hold-items{display:flex;flex-direction:column;gap:6px}
+.hold-row{display:grid;grid-template-columns:22px minmax(0,1fr) auto 34px;gap:8px;align-items:center}
+.hold-row input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--good)}
+.hold-row.got input:not([type=checkbox]){text-decoration:line-through;color:var(--muted)}
+.hold-dot{width:8px;height:8px;border-radius:50%;background:var(--line);justify-self:center}
+.hold-st{color:var(--muted);font-size:.78rem;max-width:200px}
+.hold-st.sent{color:var(--good);font-weight:700}
+.hold-x{padding:4px 8px;min-width:0}
+.hold-actions{flex-wrap:wrap}
+.hold-actions .spacer{flex:1}
+@media (max-width:600px){.hold-row{grid-template-columns:22px minmax(0,1fr) 34px}.hold-st{grid-column:2/3;grid-row:2}}
+/* hold (client side) */
+.pv-need{background:var(--surface);border:1px solid var(--line);border-left:5px solid var(--high);border-radius:16px;padding:18px 20px;display:flex;flex-direction:column;gap:14px;box-shadow:0 10px 26px -20px rgba(0,0,0,.45)}
+.pv-need-h{display:flex;gap:14px;align-items:flex-start}
+.pv-need-h h2{font-size:1.2rem;color:var(--ink)}
+.pv-need-h p{margin:3px 0 0;color:var(--muted);font-size:.92rem}
+.pv-need-ic{width:36px;height:36px;border-radius:50%;flex:none;display:grid;place-items:center;background:var(--high);color:#fff;font-weight:800;font-size:1.1rem}
+.pv-need-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:12px}
+.pv-need-card{border:1px solid var(--line);border-radius:12px;padding:14px;display:flex;flex-direction:column;gap:10px;background:var(--bg)}
+.pv-need-top{display:flex;gap:10px;align-items:flex-start}
+.pv-need-top>div{min-width:0;flex:1}
+.pv-need-top b{display:block;color:var(--ink);font-size:.95rem}
+.pv-need-since{color:var(--muted);font-size:.76rem;white-space:nowrap}
+.pv-need-note{margin:0;font-size:.9rem;font-style:italic;color:var(--text)}
+.pv-need-items{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px}
+.pv-need-items li{display:flex;align-items:center;gap:10px;flex-wrap:wrap;background:var(--surface);border:1px solid var(--line);border-radius:9px;padding:8px 10px}
+.pv-need-mark{width:22px;height:22px;border-radius:50%;flex:none;display:grid;place-items:center;border:2px solid var(--high);font-size:.75rem;font-weight:800;color:var(--good)}
+.pv-need-items li.sent .pv-need-mark{border-color:var(--gold);color:var(--gold)}
+.pv-need-items li.got .pv-need-mark{border-color:var(--good);background:var(--good);color:#fff}
+.pv-need-txt{flex:1 1 150px;min-width:0;font-weight:600;color:var(--text)}
+.pv-need-items li.got .pv-need-txt{text-decoration:line-through;color:var(--muted);font-weight:400}
+.pv-need-st{font-size:.8rem;color:var(--muted)}
+.pv-need-items li.sent .pv-need-st{color:var(--gold)}
+.pv-need-items .primary.sm{padding:5px 12px;font-size:.84rem}
+.pv-st-hold{background:var(--high-soft);color:var(--high)} .pv-st-hold::before{background:var(--high)}
+@media (max-width:720px){.pv-need{padding:14px}.pv-need-list{grid-template-columns:1fr}}
+.pause-ic{display:inline-block;width:8px;height:9px;margin-right:6px;border-left:3px solid var(--high);border-right:3px solid var(--high);box-sizing:border-box;vertical-align:-1px}
+.hold-top{display:block}

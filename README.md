@@ -84,6 +84,14 @@ To write that update, open a task's **Note** and fill in **Update for the client
 Clients never see portal passwords, internal instructions, progress notes, who is working on a task, other companies, or anything else in the app. Client logins can't open any staff page.
 Deactivate or reset a client's password there too; both sign them out straight away. Login IDs must be different from staff login IDs.
 
+## Waiting for the client (hold)
+
+When work can't move until the client sends something, use **Hold for client** on the task and list what's needed (one item per line), with an optional message.
+- The task shows **Waiting for client · 2 of 3 pending** and appears under the **Waiting for client** tab.
+- The client sees the list under **Pending from your side** on their portal and can tap **Mark as sent**. Your team then sees "Client says 1 sent: please check".
+- Tick each item as it reaches you. When everything is received, the hold ends by itself. **End hold** ends it early; marking the task Done ends it too.
+- **Copy reminder message** copies a ready-written reminder listing the pending items, to paste into WhatsApp or email.
+
 ## Recurring tasks grouped by category
 
 On the Tasks board (table view), recurring tasks are gathered under their category, e.g. **SECP / Corporate** or **Sales Tax**. Each category is one row showing how many are Pending, In progress and Done, a progress bar, and any overdue. Click the row to open the tasks in it, or click **Pending**, **In progress** or **Done** to open just those. Untick **Group recurring by category** to see every task in one list again.

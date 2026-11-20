@@ -158,6 +158,14 @@ CREATE TABLE IF NOT EXISTS recurring (
            CREATE TABLE IF NOT EXISTS portal_sessions (token_hash TEXT PRIMARY KEY, account_id INTEGER NOT NULL REFERENCES portal_accounts(id) ON DELETE CASCADE, expires_at INTEGER NOT NULL);`);
   add('client_note', "TEXT NOT NULL DEFAULT ''");
   add('client_note_at', 'INTEGER');
+  // Version 2.22: a task can be put on hold while the client sends what is needed
+  add('on_hold', 'INTEGER NOT NULL DEFAULT 0');
+  add('hold_since', 'INTEGER');
+  add('hold_note', "TEXT NOT NULL DEFAULT ''");
+  db.exec(`CREATE TABLE IF NOT EXISTS task_requests (id INTEGER PRIMARY KEY, task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+             text TEXT NOT NULL, created_by INTEGER REFERENCES users(id), created_at INTEGER NOT NULL,
+             client_sent_at INTEGER, received_at INTEGER, received_by INTEGER REFERENCES users(id));
+           CREATE INDEX IF NOT EXISTS task_requests_task ON task_requests(task_id);`);
   db.exec('CREATE INDEX IF NOT EXISTS tasks_client ON tasks(client_id)');
   const rcols = db.prepare('PRAGMA table_info(recurring)').all().map(c => c.name);
   if (!rcols.includes('partner_ids')) db.exec("ALTER TABLE recurring ADD COLUMN partner_ids TEXT NOT NULL DEFAULT ''");
@@ -478,6 +486,10 @@ function reopenedBy(t) {
                         WHERE l.task_id = ? AND l.from_status = 'done' AND l.to_status <> 'done' ORDER BY l.id DESC LIMIT 1`).get(t.id);
   return r ? { at: r.at, reason: r.reason, to: r.to_status, byName: r.name } : null;
 }
+function requestsOf(taskId) {
+  return db.prepare(`SELECT r.*, u.name received_by_name FROM task_requests r LEFT JOIN users u ON u.id = r.received_by WHERE r.task_id = ? ORDER BY r.id`).all(taskId)
+    .map(r => ({ id: r.id, text: r.text, createdAt: r.created_at, clientSentAt: r.client_sent_at, receivedAt: r.received_at, receivedByName: r.received_by_name || '' }));
+}
 function taskOut(t, me, partners) {
   const ps = partners ?? taskPartners(t.id);
   return {
@@ -488,7 +500,8 @@ function taskOut(t, me, partners) {
     recurringId: t.recurring_id, period: t.period, visibility: t.visibility || 'business',
     partnerIds: ps.map(p => p.id), partnerNames: ps.map(p => p.name),
     createdAt: t.created_at, updatedAt: t.updated_at, doneAt: t.done_at, canEdit: canEditTask(me, t),
-    canReopen: canReopen(me, t), lastReopen: reopenedBy(t), clientNote: t.client_note || '', clientNoteAt: t.client_note_at || null, doneByName: t.status === 'done' ? (db.prepare("SELECT u.name FROM task_status_log l JOIN users u ON u.id = l.user_id WHERE l.task_id = ? AND l.to_status = 'done' ORDER BY l.id DESC LIMIT 1").get(t.id)?.name || '') : '',
+    canReopen: canReopen(me, t), lastReopen: reopenedBy(t),
+    onHold: !!t.on_hold, holdSince: t.hold_since || null, holdNote: t.hold_note || '', requests: t.on_hold ? requestsOf(t.id) : [], clientNote: t.client_note || '', clientNoteAt: t.client_note_at || null, doneByName: t.status === 'done' ? (db.prepare("SELECT u.name FROM task_status_log l JOIN users u ON u.id = l.user_id WHERE l.task_id = ? AND l.to_status = 'done' ORDER BY l.id DESC LIMIT 1").get(t.id)?.name || '') : '',
     canDelete: canDeleteTask(me, t), selfAdded: t.created_by === t.assignee_id && aList(t).length === 1,
   };
 }
@@ -1088,6 +1101,7 @@ route('PATCH', '/api/tasks/:id', true, async (req, res, body, me, params) => {
       statusLog = { from: 'done', to: body.status, reason };
     } else if (t.status !== body.status) statusLog = { from: t.status, to: body.status, reason: '' };
     if (t.status !== body.status) { sets.status = body.status; sets.done_at = body.status === 'done' ? Date.now() : null; }
+    if (body.status === 'done' && t.on_hold) sets.on_hold = 0; // finishing the task ends any hold
   }
   if ('progress' in body) {
     if (!full && !mine) throw new HttpError(403, 'You can only update your own tasks.');
@@ -1456,6 +1470,60 @@ function serveStatic(req, res, urlPath) {
   });
 }
 
+/* ------------------------------------------- hold: waiting for the client */
+function holdTask(me, id) {
+  const t = db.prepare(TASK_SELECT + ' WHERE t.id = ?').get(id);
+  if (!t || !visibleTask(me, t)) throw new HttpError(404, 'Task not found.');
+  if (!canEditTask(me, t) && !aIds(t).includes(me.id)) throw new HttpError(403, 'You can only update your own tasks.');
+  return t;
+}
+const sendTask = (res, me, id, extra) => { const t = db.prepare(TASK_SELECT + ' WHERE t.id = ?').get(id); send(res, 200, { task: taskOut(t, me), ...extra }); };
+// Put a task on hold (or change the list): items are what the client still has to give
+route('PUT', '/api/tasks/:id/hold', true, async (req, res, body, me, params) => {
+  const t = holdTask(me, Number(params.id));
+  if (t.visibility === 'personal' || !t.client_id) throw bad('Only tasks for a client can wait for the client.');
+  if (t.status === 'done') throw bad('This task is already done.');
+  if (!Array.isArray(body.items)) throw bad('List what is needed from the client.');
+  const items = body.items.map(i => ({ id: i && i.id ? Number(i.id) : null, text: str(i && i.text, 300, 'Item') })).filter(i => i.text);
+  if (!items.length) throw bad('Add at least one thing needed from the client.');
+  if (items.length > 30) throw bad('Up to 30 items at a time.');
+  const note = str(body.note, 1000, 'Message to the client');
+  const now = Date.now();
+  tx(() => {
+    const cur = db.prepare('SELECT id FROM task_requests WHERE task_id = ?').all(t.id).map(r => r.id);
+    const keep = items.filter(i => i.id && cur.includes(i.id)).map(i => i.id);
+    for (const id of cur) if (!keep.includes(id)) db.prepare('DELETE FROM task_requests WHERE id = ?').run(id);
+    for (const i of items) {
+      if (i.id && keep.includes(i.id)) db.prepare('UPDATE task_requests SET text = ? WHERE id = ?').run(i.text, i.id);
+      else db.prepare('INSERT INTO task_requests (task_id, text, created_by, created_at) VALUES (?,?,?,?)').run(t.id, i.text, me.id, now);
+    }
+    // a task that wasn't on hold starts a fresh hold; items left over from an earlier hold that were received are cleared
+    if (!t.on_hold) db.prepare('DELETE FROM task_requests WHERE task_id = ? AND received_at IS NOT NULL AND created_at < ?').run(t.id, now);
+    db.prepare('UPDATE tasks SET on_hold = 1, hold_since = COALESCE(CASE WHEN on_hold = 1 THEN hold_since END, ?), hold_note = ?, updated_at = ?, updated_by = ? WHERE id = ?')
+      .run(now, note, now, me.id, t.id);
+  });
+  sendTask(res, me, t.id);
+});
+route('POST', '/api/tasks/:id/hold/release', true, async (req, res, body, me, params) => {
+  const t = holdTask(me, Number(params.id));
+  db.prepare('UPDATE tasks SET on_hold = 0, updated_at = ?, updated_by = ? WHERE id = ?').run(Date.now(), me.id, t.id);
+  sendTask(res, me, t.id);
+});
+// Tick an item as received from the client. When everything is in, the hold ends by itself.
+route('POST', '/api/tasks/:id/requests/:rid/received', true, async (req, res, body, me, params) => {
+  const t = holdTask(me, Number(params.id));
+  const r = db.prepare('SELECT * FROM task_requests WHERE id = ? AND task_id = ?').get(Number(params.rid), t.id);
+  if (!r) throw new HttpError(404, 'Item not found.');
+  const got = body.received !== false; const now = Date.now(); let released = false;
+  tx(() => {
+    db.prepare('UPDATE task_requests SET received_at = ?, received_by = ? WHERE id = ?').run(got ? now : null, got ? me.id : null, r.id);
+    if (got && t.on_hold && !db.prepare('SELECT 1 FROM task_requests WHERE task_id = ? AND received_at IS NULL').get(t.id)) {
+      db.prepare('UPDATE tasks SET on_hold = 0, updated_at = ?, updated_by = ? WHERE id = ?').run(now, me.id, t.id); released = true;
+    }
+  });
+  sendTask(res, me, t.id, { released });
+});
+
 /* -------------------------------------------------------- client portal */
 const loginTaken = u => !!(db.prepare('SELECT 1 FROM users WHERE username = ?').get(u) || db.prepare('SELECT 1 FROM portal_accounts WHERE username = ?').get(u));
 const portalOut = a => ({ name: a.name, username: a.username, mustChange: !!a.must_change });
@@ -1474,7 +1542,7 @@ route('GET', '/api/portal/dashboard', 'portal', async (req, res, body, me) => {
   const cs = db.prepare(`SELECT c.*, m.name manager_name FROM portal_access pa JOIN clients c ON c.id = pa.client_id LEFT JOIN users m ON m.id = c.manager_id
                          WHERE pa.account_id = ? AND c.active = 1 ORDER BY c.name`).all(me.id);
   const yearAgo = Date.now() - 400 * 864e5;
-  const q = db.prepare(`SELECT t.id, t.title, t.status, t.due, t.done_at, t.period, t.created_at, t.client_note, t.client_note_at, k.name category
+  const q = db.prepare(`SELECT t.id, t.title, t.status, t.due, t.done_at, t.period, t.created_at, t.client_note, t.client_note_at, t.on_hold, t.hold_since, t.hold_note, k.name category
                         FROM tasks t LEFT JOIN categories k ON k.id = t.category_id
                         WHERE t.client_id = ? AND t.visibility = 'business' AND (t.status <> 'done' OR t.done_at IS NULL OR t.done_at > ?)
                         ORDER BY (t.status = 'done'), CASE WHEN t.due = '' OR t.due IS NULL THEN 1 ELSE 0 END, t.due, t.done_at DESC`);
@@ -1483,9 +1551,21 @@ route('GET', '/api/portal/dashboard', 'portal', async (req, res, body, me) => {
     scope: c.scope === 'intl' ? 'intl' : 'local', country: c.country || '', taxId: c.tax_id || '',
     contactPerson: c.contact_person, phone: c.phone, email: c.email, partnerName: c.manager_name || '',
     tasks: q.all(c.id, yearAgo).map(t => ({ id: t.id, title: t.title, status: t.status, due: t.due || '', doneAt: t.status === 'done' ? t.done_at : null,
-      period: t.period || '', category: t.category || '', update: t.client_note || '', updateAt: t.client_note_at || null, createdAt: t.created_at })),
+      period: t.period || '', category: t.category || '', update: t.client_note || '', updateAt: t.client_note_at || null, createdAt: t.created_at,
+      onHold: !!t.on_hold && t.status !== 'done', holdSince: t.hold_since || null, holdNote: t.on_hold ? t.hold_note || '' : '',
+      requests: t.on_hold && t.status !== 'done' ? requestsOf(t.id).map(r => ({ id: r.id, text: r.text, createdAt: r.createdAt, sentAt: r.clientSentAt, receivedAt: r.receivedAt })) : [] })),
   }));
   send(res, 200, { companies });
+});
+
+// The client marks a requested item as sent (or takes it back)
+route('POST', '/api/portal/requests/:id/sent', 'portal', async (req, res, body, me, params) => {
+  const r = db.prepare(`SELECT r.id, t.on_hold, t.status FROM task_requests r JOIN tasks t ON t.id = r.task_id
+                        JOIN portal_access pa ON pa.client_id = t.client_id AND pa.account_id = ? JOIN clients c ON c.id = t.client_id AND c.active = 1
+                        WHERE r.id = ? AND t.visibility = 'business'`).get(me.id, Number(params.id));
+  if (!r || !r.on_hold || r.status === 'done') throw new HttpError(404, 'This item is no longer needed.');
+  db.prepare('UPDATE task_requests SET client_sent_at = ? WHERE id = ? AND received_at IS NULL').run(body.sent === false ? null : Date.now(), r.id);
+  send(res, 200, { ok: true });
 });
 
 /* Managing client portal logins: owner and partners */
